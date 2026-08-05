@@ -5,7 +5,7 @@
      PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW (see Code.gs setup).
      It looks like: https://script.google.com/macros/s/AKfycb.../exec
   ==================================================================== */
-  const API_URL = "PASTE_YOUR_GOOGLE_APPS_SCRIPT_URL_HERE";
+  const API_URL = "https://script.google.com/macros/s/AKfycbzDzGvbB1NrGRvICQ-G63rrzds66Inesxl_YiI8WUN7GVPdbbqXeu_qjOTwRuxNzv_QGg/exec";
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
