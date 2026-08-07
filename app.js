@@ -5,7 +5,7 @@
      PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW (see Code.gs setup).
      It looks like: https://script.google.com/macros/s/AKfycb.../exec
   ==================================================================== */
-  const API_URL = "https://script.google.com/macros/s/AKfycbzDzGvbB1NrGRvICQ-G63rrzds66Inesxl_YiI8WUN7GVPdbbqXeu_qjOTwRuxNzv_QGg/exec";
+  const API_URL = "PASTE_YOUR_GOOGLE_APPS_SCRIPT_URL_HERE";
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -30,8 +30,23 @@
     if(!API_URL || API_URL.indexOf('PASTE_YOUR') === 0){
       throw new Error('The teacher/student portal isn\'t connected to a database yet — paste your Google Apps Script URL into API_URL at the top of app.js.');
     }
-    const res = await fetch(API_URL, { method:'POST', body: JSON.stringify({ action, payload }) });
-    const data = await res.json();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(()=>controller.abort(), 20000);
+    let res;
+    try{
+      res = await fetch(API_URL, { method:'POST', body: JSON.stringify({ action, payload }), signal: controller.signal });
+    }catch(err){
+      if(err.name==='AbortError') throw new Error('The request to Google timed out after 20s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).');
+      throw new Error('Network request failed: ' + err.message + '. Check the API_URL at the top of app.js is correct and the deployment is live.');
+    }finally{
+      clearTimeout(timeoutId);
+    }
+    let data;
+    try{
+      data = await res.json();
+    }catch(err){
+      throw new Error('Got a response that wasn\'t valid JSON (status ' + res.status + '). This usually means the Apps Script isn\'t authorized yet, or access isn\'t set to "Anyone" — open the deployed URL directly in a browser tab to see the raw error.');
+    }
     if(data.error) throw new Error(data.error);
     return data;
   }
@@ -158,14 +173,15 @@
     view='teacher-results';
     teacherResultsTestTitle = decodeURIComponent(encodedTitle);
     setLoading('Loading results…');
+    let loadError = null;
     try{
       const data = await apiCall('getResults', {testId});
       teacherResultsCache = data.results || [];
-    }catch(e){ showError(e); teacherResultsCache=[]; }
-    renderTeacherResultsInner(testId);
+    }catch(e){ loadError = e.message; teacherResultsCache=[]; }
+    renderTeacherResultsInner(testId, loadError);
   };
 
-  function renderTeacherResultsInner(testId){
+  function renderTeacherResultsInner(testId, loadError){
     const rows = teacherResultsCache.map(r=>`
       <tr class="${r.violations>0?'flagged':''}">
         <td>${escapeHtml(r.studentName)}</td>
@@ -182,12 +198,14 @@
     app.innerHTML = `
       ${topbar('Results', 'app_goTeacher()')}
       <h2 class="section-title">${escapeHtml(teacherResultsTestTitle)}</h2>
+      ${loadError ? `<div class="empty-state" style="border-color:var(--red); color:var(--red); text-align:left;"><h3 style="color:var(--red);">Couldn't load results</h3><div>${escapeHtml(loadError)}</div><div style="margin-top:14px;"><button class="btn secondary small" onclick="app_viewResults('${testId}','${encodeURIComponent(teacherResultsTestTitle)}')">Try again</button></div></div>` : `
       <div class="helper" style="margin-bottom:16px;">"Flags" mean the student exited fullscreen or switched tabs during the attempt.</div>
       ${teacherResultsCache.length===0 ? `<div class="empty-state"><h3>No attempts yet</h3><div>Results will appear here once students submit the test.</div></div>` : `
       <table class="subj-table">
         <thead><tr><th>Name</th><th>Roll no.</th><th>Score</th><th>Correct</th><th>Wrong</th><th>Unatt.</th><th>Time</th><th>Flags</th><th>Submitted</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`}
+      `}
     `;
   }
 
