@@ -223,3 +223,25 @@
 
 /* ---------- Flagged result row ---------- */
 tr.flagged{background:var(--red-soft);}
+
+/* ---------- Loading spinner ---------- */
+.loading-row{display:flex; align-items:center; gap:12px; padding:40px 0;}
+.spinner{
+  width:18px; height:18px; border-radius:50%; border:2.5px solid var(--line); border-top-color:var(--ink);
+  animation:spin 0.8s linear infinite; flex-shrink:0;
+}
+@keyframes spin{ to{ transform:rotate(360deg); } }
+
+/* ---------- Diagnostics footer (version stamp + connection test) ---------- */
+#diag-footer{
+  position:fixed; bottom:10px; right:12px; z-index:500;
+  display:flex; align-items:center; gap:10px;
+  background:var(--white); border:1px solid var(--line); border-radius:20px;
+  padding:5px 12px; font-size:11px; color:var(--ink-soft); box-shadow:0 2px 8px rgba(27,35,64,0.08);
+}
+#diag-footer button{
+  border:none; background:transparent; color:var(--ink-soft); font-size:11px; text-decoration:underline;
+  cursor:pointer; padding:0;
+}
+#diag-footer button:hover{ color:var(--ink); }
+#diag-footer button:disabled{ opacity:0.5; cursor:default; text-decoration:none; }
