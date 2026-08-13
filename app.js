@@ -10,6 +10,11 @@
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
 
+  // Short, non-obvious student-link key — doesn't say "student" anywhere.
+  // Change this string any time to invalidate old shared links.
+  const STUDENT_LINK_KEY = 'k';
+  const STUDENT_LINK_VALUE = 'p9x2q7';
+
   /* ============ STATE ============ */
   let view = 'role';           // role | teacher-pin | teacher-home | builder | teacher-results | student-entry | student-rules | player | result | submit-error
   let role = null;             // 'teacher' | 'student'
@@ -188,12 +193,16 @@
         </div>
         <button class="btn" onclick="app_newTest()">+ New test</button>
       </div>
-      <div class="panel" style="margin-bottom:22px; padding:16px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
-        <div>
+      <div class="panel" style="margin-bottom:22px; padding:16px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:18px;">
+        <div style="flex:1; min-width:220px;">
           <div style="font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin-bottom:4px;">Student link — share this with your class</div>
-          <div class="mono" style="font-size:13.5px;" id="student-link-text">${window.location.origin}${window.location.pathname}?role=student</div>
+          <div class="mono" style="font-size:13.5px; word-break:break-all;" id="student-link-text">${studentLinkUrl()}</div>
+          <div style="display:flex; gap:8px; margin-top:10px;">
+            <button class="btn secondary small" onclick="app_copyStudentLink()">Copy link</button>
+            <button class="btn secondary small" onclick="app_downloadQR()">Download QR</button>
+          </div>
         </div>
-        <button class="btn secondary small" onclick="app_copyStudentLink()">Copy link</button>
+        <div id="qr-code-box" style="flex-shrink:0;"></div>
       </div>
       ${teacherTests.length===0 ? `
         <div class="empty-state">
@@ -203,10 +212,29 @@
         </div>
       ` : `<div class="card-grid">${cards}</div>`}
     `;
+    renderStudentQR();
   }
 
+  function renderStudentQR(){
+    const box = document.getElementById('qr-code-box');
+    if(!box || typeof QRCode==='undefined') return;
+    box.innerHTML = '';
+    new QRCode(box, {
+      text: studentLinkUrl(), width: 128, height: 128,
+      colorDark: '#1B2340', colorLight: '#FFFFFF'
+    });
+  }
+  window.app_downloadQR = function(){
+    const canvas = document.querySelector('#qr-code-box canvas');
+    if(!canvas){ alert('QR code not ready yet — try again in a moment.'); return; }
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = 'student-test-link-qr.png';
+    a.click();
+  };
+
   window.app_copyStudentLink = function(){
-    const link = window.location.origin + window.location.pathname + '?role=student';
+    const link = studentLinkUrl();
     navigator.clipboard.writeText(link).then(()=>{
       alert('Student link copied:\n' + link);
     }).catch(()=>{
@@ -334,11 +362,17 @@
           </div>
         </div>
 
-        <div id="q-list">${qBlocks || '<div class="helper" style="margin:16px 0;">No questions yet. Add your first question below.</div>'}</div>
+        <div id="q-list">${qBlocks || '<div class="helper" style="margin:16px 0;">No questions yet. Add your first question below, or import many at once from a CSV file.</div>'}</div>
 
-        <div style="display:flex; gap:10px; margin-top:6px;">
+        <div style="display:flex; gap:10px; margin-top:6px; flex-wrap:wrap;">
           <button class="btn secondary" onclick="app_addQ()">+ Add question</button>
+          <label class="btn secondary" style="margin:0;">
+            Import from CSV
+            <input type="file" accept=".csv,text/csv" id="csv-import-input" style="display:none;">
+          </label>
+          <button class="btn secondary" onclick="app_downloadCsvTemplate()">Download CSV template</button>
         </div>
+        <div class="helper" style="margin-top:8px;">CSV columns: Subject, Question, OptionA, OptionB, OptionC, OptionD, CorrectOption (A/B/C/D), ImageURL (optional, a public image link).</div>
 
         <div style="margin-top:24px; border-top:1px solid var(--line); padding-top:18px; display:flex; gap:10px;">
           <button class="btn" onclick="app_saveTest()">Save test</button>
@@ -366,6 +400,114 @@
         };
       });
     }
+    const csvInput = document.getElementById('csv-import-input');
+    if(csvInput) csvInput.onchange = onCsvFileChosen;
+  }
+
+  /* ============ CSV IMPORT ============ */
+  const CSV_HEADERS = ['Subject','Question','OptionA','OptionB','OptionC','OptionD','CorrectOption','ImageURL'];
+
+  function parseCSV(text){
+    const rows = [];
+    let row = [], field = '', inQuotes = false;
+    for(let i=0;i<text.length;i++){
+      const c = text[i], next = text[i+1];
+      if(inQuotes){
+        if(c==='"' && next==='"'){ field+='"'; i++; }
+        else if(c==='"'){ inQuotes=false; }
+        else field += c;
+      } else {
+        if(c==='"'){ inQuotes = true; }
+        else if(c===','){ row.push(field); field=''; }
+        else if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+        else if(c==='\r'){ /* skip, \n handles the line break */ }
+        else field += c;
+      }
+    }
+    if(field.length>0 || row.length>0){ row.push(field); rows.push(row); }
+    return rows.filter(r => r.some(f => f.trim() !== ''));
+  }
+
+  function onCsvFileChosen(e){
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      try{
+        importQuestionsFromCsv(reader.result);
+      }catch(err){
+        alert('Could not read that CSV: ' + err.message);
+      }
+      e.target.value = '';
+    };
+    reader.readAsText(file);
+  }
+
+  function importQuestionsFromCsv(text){
+    const rows = parseCSV(text);
+    if(rows.length < 2){ alert('That CSV has no question rows below the header.'); return; }
+    const header = rows[0].map(h=>h.trim().toLowerCase());
+    const idx = {
+      subject: header.indexOf('subject'),
+      question: header.indexOf('question'),
+      a: header.indexOf('optiona'),
+      b: header.indexOf('optionb'),
+      c: header.indexOf('optionc'),
+      d: header.indexOf('optiond'),
+      correct: header.indexOf('correctoption'),
+      image: header.indexOf('imageurl')
+    };
+    if(idx.question<0 || idx.a<0 || idx.b<0 || idx.c<0 || idx.d<0 || idx.correct<0){
+      alert('That CSV is missing required columns. Expected: ' + CSV_HEADERS.join(', '));
+      return;
+    }
+    const correctMap = {A:0,B:1,C:2,D:3};
+    let imported = 0;
+    const skipped = [];
+    for(let r=1;r<rows.length;r++){
+      const row = rows[r];
+      const text = (row[idx.question]||'').trim();
+      if(!text) continue;
+      const opts = [row[idx.a], row[idx.b], row[idx.c], row[idx.d]].map(v=>(v||'').trim());
+      const correctLetter = (row[idx.correct]||'').trim().toUpperCase();
+      const correct = correctMap[correctLetter];
+      if(opts.some(o=>!o) || correct===undefined){
+        skipped.push(`Row ${r+1}: ${text.slice(0,40) || '(blank question)'}`);
+        continue;
+      }
+      builder.questions.push({
+        id: uid(),
+        subject: idx.subject>=0 ? (row[idx.subject]||'').trim() : '',
+        text,
+        image: idx.image>=0 && (row[idx.image]||'').trim() ? (row[idx.image]||'').trim() : null,
+        options: opts,
+        correct
+      });
+      imported++;
+    }
+    renderBuilder();
+    let msg = `Imported ${imported} question${imported!==1?'s':''}.`;
+    if(skipped.length) msg += `\n\nSkipped ${skipped.length} row(s) with missing options or an invalid CorrectOption letter:\n` + skipped.slice(0,10).join('\n') + (skipped.length>10?'\n…':'');
+    alert(msg);
+  }
+
+  window.app_downloadCsvTemplate = function(){
+    const exampleRow = ['Physics','Example: What is the SI unit of force?','Newton','Joule','Watt','Pascal','A',''];
+    const csvRows = [CSV_HEADERS, exampleRow];
+    const csvText = csvRows.map(r => r.map(csvEscape).join(',')).join('\r\n');
+    downloadTextFile(csvText, 'question-upload-template.csv', 'text/csv');
+  };
+  function csvEscape(field){
+    field = String(field);
+    if(/[",\n]/.test(field)) return '"' + field.replace(/"/g,'""') + '"';
+    return field;
+  }
+  function downloadTextFile(text, filename, mime){
+    const blob = new Blob([text], {type: mime});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
   }
 
   function onQFieldChange(e){
@@ -852,11 +994,16 @@
   }
   window.app_setFilter = function(k){ reviewFilter=k; renderResult(); };
 
+  function studentLinkUrl(){
+    return `${window.location.origin}${window.location.pathname}?${STUDENT_LINK_KEY}=${STUDENT_LINK_VALUE}`;
+  }
+
   /* ============ INIT ============ */
   (function init(){
     const params = new URLSearchParams(window.location.search);
     const r = params.get('role');
-    if(r==='student'){ forcedRole='student'; window.app_goStudentEntry(); }
+    const isStudentLink = params.get(STUDENT_LINK_KEY) === STUDENT_LINK_VALUE || r==='student';
+    if(isStudentLink){ forcedRole='student'; window.app_goStudentEntry(); }
     else if(r==='teacher'){ window.app_goTeacher(); }
     else { render(); }
   })();
