@@ -11,8 +11,10 @@
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
 
   /* ============ STATE ============ */
-  let view = 'role';           // role | teacher-home | builder | teacher-results | student-entry | student-rules | player | result
+  let view = 'role';           // role | teacher-pin | teacher-home | builder | teacher-results | student-entry | student-rules | player | result | submit-error
   let role = null;             // 'teacher' | 'student'
+  let forcedRole = null;       // set once from the URL — 'student' link never exposes the teacher option
+  let teacherPinError = '';
   let teacherTests = [];
   let builder = null;
   let studentTest = null;      // stripped test (no answers) for the student taking it
@@ -65,6 +67,7 @@
 
   function render(){
     if(view==='role') return renderRole();
+    if(view==='teacher-pin') return renderTeacherPin();
     if(view==='teacher-home') return renderTeacherHome();
     if(view==='builder') return renderBuilder();
     if(view==='teacher-results') return renderTeacherResults();
@@ -88,11 +91,12 @@
     app.innerHTML = `
       ${topbar('Choose your role')}
       <div class="role-grid">
+        ${forcedRole==='student' ? '' : `
         <div class="role-card" onclick="app_goTeacher()">
           <div class="role-icon">T</div>
           <h3>I'm a teacher</h3>
-          <div class="helper">Create tests, share a test code with your class, and review every student's score and violations.</div>
-        </div>
+          <div class="helper">Create tests, share a test code with your class, and review every student's score and violations. PIN required.</div>
+        </div>`}
         <div class="role-card" onclick="app_goStudentEntry()">
           <div class="role-icon">S</div>
           <h3>I'm a student</h3>
@@ -102,6 +106,41 @@
     `;
   }
   window.app_goTeacher = async function(){
+    if(sessionStorage.getItem('teacherUnlocked')==='1'){
+      await enterTeacherHome();
+      return;
+    }
+    role='teacher'; view='teacher-pin'; teacherPinError=''; render();
+  };
+  function renderTeacherPin(){
+    app.innerHTML = `
+      ${topbar('Teacher access', 'app_backToRole()')}
+      <div class="panel" style="max-width:380px; margin:0 auto; text-align:center;">
+        <h2 class="section-title">Enter teacher PIN</h2>
+        <div class="helper" style="margin:8px 0 16px;">This keeps students from opening the teacher dashboard.</div>
+        <input id="t-pin" type="password" inputmode="numeric" placeholder="PIN" style="width:100%; padding:10px; text-align:center; font-size:18px; border:1px solid var(--line); border-radius:var(--radius); margin-bottom:12px;">
+        <button class="btn" style="width:100%;" onclick="app_submitTeacherPin()">Unlock</button>
+        <div class="helper" style="color:var(--red); margin-top:10px;">${escapeHtml(teacherPinError)}</div>
+      </div>
+    `;
+    const pinEl = document.getElementById('t-pin');
+    pinEl.focus();
+    pinEl.onkeydown = (e)=>{ if(e.key==='Enter') window.app_submitTeacherPin(); };
+  }
+  window.app_submitTeacherPin = async function(){
+    const pin = document.getElementById('t-pin').value.trim();
+    if(!pin){ teacherPinError='Enter the PIN.'; renderTeacherPin(); return; }
+    setLoading('Checking…');
+    try{
+      await apiCall('checkTeacherPin', {pin});
+      sessionStorage.setItem('teacherUnlocked','1');
+      await enterTeacherHome();
+    }catch(e){
+      teacherPinError = e.message;
+      view='teacher-pin'; render();
+    }
+  };
+  async function enterTeacherHome(){
     role='teacher'; view='teacher-home';
     setLoading('Loading your tests…');
     try{
@@ -110,9 +149,13 @@
       teacherTests.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
     }catch(e){ showError(e); teacherTests=[]; }
     render();
-  };
+  }
   window.app_goStudentEntry = function(){ role='student'; view='student-entry'; render(); };
-  window.app_backToRole = function(){ role=null; view='role'; render(); };
+  window.app_backToRole = function(){
+    role=null;
+    view = (forcedRole==='student') ? 'student-entry' : 'role';
+    render();
+  };
 
   /* ============ TEACHER HOME ============ */
   function renderTeacherHome(){
@@ -384,7 +427,7 @@
   /* ============ STUDENT ENTRY ============ */
   function renderStudentEntry(){
     app.innerHTML = `
-      ${topbar('Student', 'app_backToRole()')}
+      ${topbar('Student', forcedRole==='student' ? null : 'app_backToRole()')}
       <div class="panel" style="max-width:460px; margin:0 auto;">
         <h2 class="section-title">Enter the test</h2>
         <div class="field" style="margin-bottom:14px;">
@@ -813,7 +856,7 @@
   (function init(){
     const params = new URLSearchParams(window.location.search);
     const r = params.get('role');
-    if(r==='student'){ window.app_goStudentEntry(); }
+    if(r==='student'){ forcedRole='student'; window.app_goStudentEntry(); }
     else if(r==='teacher'){ window.app_goTeacher(); }
     else { render(); }
   })();
