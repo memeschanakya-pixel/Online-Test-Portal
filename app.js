@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v7';
+  const APP_VERSION = 'v8';
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -196,9 +196,13 @@
   function renderTeacherHome(){
     const cards = teacherTests.map(t=>{
       const subjects = [...new Set(t.questions.map(q=>q.subject).filter(Boolean))];
+      const isActive = t.active !== false;
       return `
-      <div class="test-card">
-        <div class="serial">TEST CODE — SHARE WITH STUDENTS</div>
+      <div class="test-card ${isActive?'':'inactive-card'}">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div class="serial">TEST CODE — SHARE WITH STUDENTS</div>
+          <span class="status-pill ${isActive?'correct':'skip'}">${isActive?'Active':'Inactive'}</span>
+        </div>
         <div class="test-code">${t.id}</div>
         <h3>${escapeHtml(t.title)}</h3>
         <div class="meta-row">
@@ -209,6 +213,7 @@
         <div class="card-actions">
           <button class="btn secondary small" onclick="app_editTest('${t.id}')">Edit</button>
           <button class="btn secondary small" onclick="app_viewResults('${t.id}','${encodeURIComponent(t.title)}')">View results</button>
+          <button class="btn secondary small" onclick="app_toggleActive('${t.id}')">${isActive?'Deactivate':'Activate'}</button>
           <button class="btn danger small" onclick="app_deleteTest('${t.id}')">Delete</button>
         </div>
       </div>`;
@@ -272,8 +277,20 @@
     });
   };
 
+  // Short, easy-to-read test codes (no 0/O/1/I/L, which get confused when spoken
+  // or handwritten), checked against your currently-loaded tests to avoid collisions.
+  function genTestCode(){
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    let code;
+    do{
+      code = '';
+      for(let i=0;i<6;i++) code += alphabet[Math.floor(Math.random()*alphabet.length)];
+    } while(teacherTests.some(t=>t.id===code));
+    return code;
+  }
+
   window.app_newTest = function(){
-    builder = { id: uid(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, questions:[], createdAt: Date.now() };
+    builder = { id: genTestCode(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, active:true, questions:[], createdAt: Date.now() };
     view='builder'; render();
   };
   window.app_editTest = function(id){
@@ -287,6 +304,15 @@
     setLoading('Deleting…');
     try{ await apiCall('deleteTest', {id}); }catch(e){ showError(e); }
     await window.app_goTeacher();
+  };
+  window.app_toggleActive = async function(id){
+    const t = teacherTests.find(x=>x.id===id);
+    if(!t) return;
+    const willBeActive = t.active === false;
+    t.active = willBeActive;
+    setLoading(willBeActive ? 'Activating…' : 'Deactivating…');
+    try{ await apiCall('saveTest', t); }catch(e){ showError(e); }
+    await enterTeacherHome();
   };
   window.app_viewResults = async function(testId, encodedTitle){
     view='teacher-results';
@@ -321,6 +347,11 @@
       ${loadError ? `<div class="empty-state" style="border-color:var(--red); color:var(--red); text-align:left;"><h3 style="color:var(--red);">Couldn't load results</h3><div>${escapeHtml(loadError)}</div><div style="margin-top:14px;"><button class="btn secondary small" onclick="app_viewResults('${testId}','${encodeURIComponent(teacherResultsTestTitle)}')">Try again</button></div></div>` : `
       <div class="helper" style="margin-bottom:16px;">"Flags" mean the student exited fullscreen or switched tabs during the attempt.</div>
       ${teacherResultsCache.length===0 ? `<div class="empty-state"><h3>No attempts yet</h3><div>Results will appear here once students submit the test.</div></div>` : `
+      <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn secondary small" onclick="app_downloadResultsCsv()">Download results (CSV)</button>
+        <button class="btn secondary small" onclick="app_downloadResponsesCsv()">Download responses (CSV)</button>
+        <button class="btn secondary small" onclick="app_downloadResultsPdf()">Download PDF report</button>
+      </div>
       <table class="subj-table">
         <thead><tr><th>Name</th><th>Roll no.</th><th>Score</th><th>Correct</th><th>Wrong</th><th>Unatt.</th><th>Time</th><th>Flags</th><th>Submitted</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
@@ -349,6 +380,93 @@
         </div>`;
     }).join('');
     showModal(`${r.studentName}${r.rollNo ? ' · '+r.rollNo : ''} — ${r.score}/${r.total}`, body);
+  };
+
+  /* ============ RESULTS EXPORT (CSV + PDF) ============ */
+  function sanitizeFilename(s){ return String(s).trim().replace(/[^a-z0-9\-]+/gi,'-').replace(/^-+|-+$/g,'').toLowerCase() || 'test'; }
+
+  window.app_downloadResultsCsv = function(){
+    const header = ['Name','Roll No','Score','Total','Correct','Wrong','Unattempted','Time (s)','Violations','Submitted'];
+    const rows = teacherResultsCache.map(r=>[
+      r.studentName, r.rollNo||'', r.score, r.total, r.correct, r.wrong, r.unattempted,
+      Math.round(r.timeTakenSec||0), r.violations||0, new Date(r.date).toLocaleString()
+    ]);
+    const csvText = [header, ...rows].map(row => row.map(csvEscape).join(',')).join('\r\n');
+    downloadTextFile(csvText, sanitizeFilename(teacherResultsTestTitle)+'-results.csv', 'text/csv');
+  };
+
+  window.app_downloadResponsesCsv = function(){
+    const header = ['Name','Roll No','Q#','Subject','Question','Your Answer','Correct Answer','Status'];
+    const rows = [];
+    teacherResultsCache.forEach(r=>{
+      (r.perQuestion||[]).forEach(pq=>{
+        const yourAns = pq.sel===null||pq.sel===undefined ? 'Not attempted' : `${String.fromCharCode(65+pq.sel)}. ${pq.options[pq.sel]}`;
+        const correctAns = `${String.fromCharCode(65+pq.correct)}. ${pq.options[pq.correct]}`;
+        rows.push([r.studentName, r.rollNo||'', pq.i+1, pq.subject||'', pq.text, yourAns, correctAns, pq.status]);
+      });
+    });
+    if(rows.length===0){ showModal('Nothing to export', 'No detailed responses are available for this test yet.'); return; }
+    const csvText = [header, ...rows].map(row => row.map(csvEscape).join(',')).join('\r\n');
+    downloadTextFile(csvText, sanitizeFilename(teacherResultsTestTitle)+'-responses.csv', 'text/csv');
+  };
+
+  function buildPrintableReportHtml(title, results){
+    const summaryRows = results.map(r=>`
+      <tr><td>${escapeHtml(r.studentName)}</td><td>${escapeHtml(r.rollNo||'—')}</td><td>${r.score}/${r.total}</td>
+      <td>${r.correct}</td><td>${r.wrong}</td><td>${r.unattempted}</td><td>${fmtTime(r.timeTakenSec)}</td>
+      <td>${r.violations||0}</td><td>${new Date(r.date).toLocaleString()}</td></tr>`).join('');
+
+    const detailSections = results.map(r=>{
+      const qRows = (r.perQuestion||[]).map(pq=>{
+        const yourAns = pq.sel===null||pq.sel===undefined ? 'Not attempted' : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`;
+        const correctAns = `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
+        return `<tr><td>${pq.i+1}</td><td>${escapeHtml(pq.subject||'')}</td><td>${escapeHtml(pq.text)}</td><td>${yourAns}</td><td>${correctAns}</td><td>${pq.status}</td></tr>`;
+      }).join('');
+      return `
+        <div class="student-section">
+          <h3>${escapeHtml(r.studentName)}${r.rollNo?' · '+escapeHtml(r.rollNo):''} — ${r.score}/${r.total}</h3>
+          <table>
+            <thead><tr><th>Q#</th><th>Subject</th><th>Question</th><th>Answered</th><th>Correct answer</th><th>Status</th></tr></thead>
+            <tbody>${qRows}</tbody>
+          </table>
+        </div>`;
+    }).join('');
+
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)} — Results</title>
+    <style>
+      body{font-family:Georgia,'Times New Roman',serif; color:#1B2340; padding:28px; font-size:13px;}
+      h1{font-size:22px; border-bottom:2px solid #1B2340; padding-bottom:10px; margin-bottom:4px;}
+      h2{font-size:16px; margin-top:26px;}
+      h3{font-size:14px; margin:20px 0 8px; border-top:1px solid #ccc; padding-top:14px;}
+      table{width:100%; border-collapse:collapse; margin-bottom:10px;}
+      th,td{border:1px solid #ccc; padding:5px 8px; text-align:left; font-size:12px; vertical-align:top;}
+      th{background:#F1E4C2;}
+      .student-section{page-break-inside:avoid;}
+      .print-btn{padding:8px 16px; margin-bottom:16px; cursor:pointer;}
+      @media print{ .print-btn{display:none;} }
+    </style></head>
+    <body>
+      <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+      <h1>${escapeHtml(title)}</h1>
+      <div style="color:#555; margin-bottom:6px;">Results report</div>
+      <h2>Summary</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Roll No</th><th>Score</th><th>Correct</th><th>Wrong</th><th>Unatt.</th><th>Time</th><th>Flags</th><th>Submitted</th></tr></thead>
+        <tbody>${summaryRows}</tbody>
+      </table>
+      <h2>Detailed responses</h2>
+      ${detailSections || '<div>No detailed responses available.</div>'}
+    </body></html>`;
+  }
+
+  window.app_downloadResultsPdf = function(){
+    if(teacherResultsCache.length===0){ showModal('Nothing to export', 'No results yet for this test.'); return; }
+    const html = buildPrintableReportHtml(teacherResultsTestTitle, teacherResultsCache);
+    const win = window.open('', '_blank');
+    if(!win){ showModal('Pop-up blocked', 'Please allow pop-ups for this site in your browser, then try again.', true); return; }
+    win.document.write(html);
+    win.document.close();
+    setTimeout(()=>{ try{ win.print(); }catch(e){} }, 400);
   };
 
   /* ============ BUILDER (teacher) ============ */
