@@ -5,7 +5,7 @@
      PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW (see Code.gs setup).
      It looks like: https://script.google.com/macros/s/AKfycb.../exec
   ==================================================================== */
-  const API_URL = "https://script.google.com/macros/s/AKfycbzDzGvbB1NrGRvICQ-G63rrzds66Inesxl_YiI8WUN7GVPdbbqXeu_qjOTwRuxNzv_QGg/exec";
+  const API_URL = "PASTE_YOUR_GOOGLE_APPS_SCRIPT_URL_HERE";
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -17,6 +17,7 @@
   let builder = null;
   let studentTest = null;      // stripped test (no answers) for the student taking it
   let studentInfo = null;      // {name, rollNo}
+  let resumedProgress = null;  // saved progress fetched on lookup, if any
   let attempt = null;
   let resultData = null;
   let reviewFilter = 'all';
@@ -71,6 +72,7 @@
     if(view==='student-rules') return renderStudentRules();
     if(view==='player') return renderPlayer();
     if(view==='result') return renderResult();
+    if(view==='submit-error') return renderSubmitError();
   }
 
   function topbar(tag, backFn){
@@ -143,6 +145,13 @@
         </div>
         <button class="btn" onclick="app_newTest()">+ New test</button>
       </div>
+      <div class="panel" style="margin-bottom:22px; padding:16px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div>
+          <div style="font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin-bottom:4px;">Student link — share this with your class</div>
+          <div class="mono" style="font-size:13.5px;" id="student-link-text">${window.location.origin}${window.location.pathname}?role=student</div>
+        </div>
+        <button class="btn secondary small" onclick="app_copyStudentLink()">Copy link</button>
+      </div>
       ${teacherTests.length===0 ? `
         <div class="empty-state">
           <h3>No tests yet</h3>
@@ -152,6 +161,15 @@
       ` : `<div class="card-grid">${cards}</div>`}
     `;
   }
+
+  window.app_copyStudentLink = function(){
+    const link = window.location.origin + window.location.pathname + '?role=student';
+    navigator.clipboard.writeText(link).then(()=>{
+      alert('Student link copied:\n' + link);
+    }).catch(()=>{
+      prompt('Copy this student link:', link);
+    });
+  };
 
   window.app_newTest = function(){
     builder = { id: uid(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, questions:[], createdAt: Date.now() };
@@ -398,6 +416,11 @@
       const data = await apiCall('getTestForStudent', {id: code});
       studentTest = data.test;
       studentInfo = {name, rollNo: roll};
+      resumedProgress = null;
+      try{
+        const pData = await apiCall('getProgress', {testId: code, studentName: name, rollNo: roll});
+        if(pData.progress) resumedProgress = pData.progress;
+      }catch(e){ /* non-fatal — just start fresh if this check fails */ }
       view='student-rules'; render();
     }catch(e){ errEl.textContent = e.message; }
   };
@@ -413,14 +436,16 @@
           <span>${studentTest.duration} minutes</span>
           <span>+${studentTest.marksCorrect}${studentTest.marksWrong>0?' / −'+studentTest.marksWrong:''} marking</span>
         </div>
+        ${resumedProgress ? `<div class="helper" style="background:var(--gold-soft); border:1px solid var(--gold); border-radius:var(--radius); padding:10px 12px; margin-bottom:16px;">You have an in-progress attempt for this test — your answers so far will be restored and the timer will continue from your original start time.</div>` : ''}
         <ul class="rules-list">
           <li>This test opens in <strong>fullscreen</strong> and stays locked until you submit.</li>
           <li>Exiting fullscreen or switching tabs/apps is <strong>detected and logged</strong> for your teacher to see.</li>
           <li>After ${MAX_VIOLATIONS} such warnings, the test <strong>submits automatically</strong>.</li>
           <li>Right-click and copy/paste are disabled during the test.</li>
           <li>The timer auto-submits your test when it reaches zero.</li>
+          <li>Your answers are <strong>saved automatically</strong> as you go — closing the tab by accident won't lose your progress.</li>
         </ul>
-        <button class="btn" onclick="app_beginTest()">Begin test (enters fullscreen)</button>
+        <button class="btn" onclick="app_beginTest()">${resumedProgress?'Resume test (fullscreen)':'Begin test (fullscreen)'}</button>
       </div>
     `;
   }
@@ -432,23 +457,60 @@
       else if(el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
     }catch(e){ /* proceed even if fullscreen is denied; violation tracking still runs */ }
 
+    const startedAt = resumedProgress ? resumedProgress.startedAt : Date.now();
+    const initialStatus = resumedProgress ? resumedProgress.status : studentTest.questions.map(()=> 'not-visited');
+    const initialSelected = resumedProgress ? resumedProgress.answers : studentTest.questions.map(()=> null);
+    let startIdx = initialStatus.findIndex(s=> s==='not-visited' || s==='not-answered');
+    if(startIdx<0) startIdx = 0;
+
     attempt = {
       test: studentTest,
-      status: studentTest.questions.map(()=> 'not-visited'),
-      selected: studentTest.questions.map(()=> null),
-      current: 0,
-      startedAt: Date.now(),
-      endAt: Date.now() + studentTest.duration*60000,
+      status: initialStatus,
+      selected: initialSelected,
+      current: startIdx,
+      startedAt,
+      endAt: startedAt + studentTest.duration*60000,
       timer: null,
-      violations: 0,
+      violations: resumedProgress ? (resumedProgress.violations||0) : 0,
       submitting: false
     };
-    attempt.status[0] = 'not-answered';
+    if(attempt.status[attempt.current]==='not-visited') attempt.status[attempt.current] = 'not-answered';
+    resumedProgress = null;
     setupAntiCheat();
+
+    if(attempt.endAt <= Date.now()){
+      view='player'; render();
+      submitAttemptFlow(true, false);
+      return;
+    }
     view='player';
     render();
     startTimer();
   };
+
+  /* ============ PROGRESS AUTOSAVE ============ */
+  let progressSaveTimer = null;
+  function scheduleSaveProgress(immediate){
+    if(!attempt || attempt.submitting) return;
+    if(progressSaveTimer) clearTimeout(progressSaveTimer);
+    const doSave = ()=>{
+      apiCall('saveProgress', {
+        testId: attempt.test.id, studentName: studentInfo.name, rollNo: studentInfo.rollNo,
+        answers: attempt.selected, status: attempt.status, violations: attempt.violations, startedAt: attempt.startedAt
+      }).catch(()=>{ /* silent — next change will retry the save */ });
+    };
+    if(immediate) doSave();
+    else progressSaveTimer = setTimeout(doSave, 1200);
+  }
+  window.addEventListener('beforeunload', function(){
+    if(view==='player' && attempt && !attempt.submitting && API_URL.indexOf('PASTE_YOUR')!==0){
+      const body = JSON.stringify({ action:'saveProgress', payload:{
+        testId: attempt.test.id, studentName: studentInfo.name, rollNo: studentInfo.rollNo,
+        answers: attempt.selected, status: attempt.status, violations: attempt.violations, startedAt: attempt.startedAt
+      }});
+      navigator.sendBeacon(API_URL, new Blob([body], {type:'text/plain'}));
+    }
+  });
 
   /* ============ ANTI-CHEAT ============ */
   function setupAntiCheat(){
@@ -477,6 +539,7 @@
   }
   function registerViolation(msg){
     attempt.violations++;
+    scheduleSaveProgress(true);
     showViolationOverlay(msg, attempt.violations);
     if(attempt.violations >= MAX_VIOLATIONS) submitAttemptFlow(false, true);
   }
@@ -587,22 +650,26 @@
     attempt.selected[attempt.current] = oi;
     const st = attempt.status[attempt.current];
     attempt.status[attempt.current] = st==='marked' ? 'answered-marked' : 'answered';
+    scheduleSaveProgress(false);
     renderPlayer();
   };
   window.app_clearResponse = function(){
     attempt.selected[attempt.current] = null;
     attempt.status[attempt.current] = 'not-answered';
+    scheduleSaveProgress(false);
     renderPlayer();
   };
   window.app_markReview = function(){
     const hasAns = attempt.selected[attempt.current]!==null;
     attempt.status[attempt.current] = hasAns ? 'answered-marked' : 'marked';
+    scheduleSaveProgress(false);
     moveNext();
   };
   window.app_saveNext = function(){
     if(attempt.status[attempt.current]==='not-visited' && attempt.selected[attempt.current]===null){
       attempt.status[attempt.current]='not-answered';
     }
+    scheduleSaveProgress(false);
     moveNext();
   };
   function moveNext(){
@@ -630,6 +697,7 @@
     if(attempt.timer) clearInterval(attempt.timer);
     teardownAntiCheat();
     if(document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(()=>{});
+    if(progressSaveTimer) clearTimeout(progressSaveTimer);
 
     const timeTakenSec = (Date.now()-attempt.startedAt)/1000;
     setLoading('Submitting your test…');
@@ -650,10 +718,33 @@
       view='result';
       render();
     }catch(e){
-      showError(e);
-      view='student-entry'; render();
+      // IMPORTANT: don't discard `attempt` here — answers are still safe (they were
+      // autosaved as the student worked, and remain in memory too). Let them retry.
+      attempt.submitting = false;
+      lastSubmitError = e.message;
+      lastSubmitMeta = {timedOut, autoSubmittedForViolations};
+      view = 'submit-error';
+      render();
     }
   }
+
+  let lastSubmitError = '';
+  let lastSubmitMeta = null;
+  function renderSubmitError(){
+    app.innerHTML = `
+      ${topbar('Submission issue')}
+      <div class="panel" style="max-width:520px; margin:0 auto; text-align:center;">
+        <h2 class="section-title" style="color:var(--red);">Couldn't submit just yet</h2>
+        <div class="helper" style="margin:12px 0 18px;">${escapeHtml(lastSubmitError)}</div>
+        <div class="helper" style="margin-bottom:20px;">Don't worry — none of your answers are lost. They've been saved automatically as you worked through the test.</div>
+        <button class="btn" onclick="app_retrySubmit()">Retry submit</button>
+      </div>
+    `;
+  }
+  window.app_retrySubmit = function(){
+    attempt.submitting = false;
+    submitAttemptFlow(lastSubmitMeta.timedOut, lastSubmitMeta.autoSubmittedForViolations);
+  };
 
   /* ============ RESULT (student view, server-scored) ============ */
   function renderResult(){
@@ -719,5 +810,11 @@
   window.app_setFilter = function(k){ reviewFilter=k; renderResult(); };
 
   /* ============ INIT ============ */
-  render();
+  (function init(){
+    const params = new URLSearchParams(window.location.search);
+    const r = params.get('role');
+    if(r==='student'){ window.app_goStudentEntry(); }
+    else if(r==='teacher'){ window.app_goTeacher(); }
+    else { render(); }
+  })();
 })();
