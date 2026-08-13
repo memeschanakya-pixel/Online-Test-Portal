@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v4';
+  const APP_VERSION = 'v5';
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -74,7 +74,31 @@
   function setLoading(msg){
     app.innerHTML = `<div class="loading-row"><span class="spinner"></span><span class="helper">${escapeHtml(msg||'Loading…')}</span></div>`;
   }
-  function showError(err){ alert(err.message || String(err)); }
+
+  /* ============ NON-BLOCKING MODAL (replaces alert() for status/results,
+     since alert() freezes all page JS — including pending fetches/timers —
+     which made unrelated screens look frozen while a dialog was open) ============ */
+  function showModal(title, bodyHtml, isError){
+    let el = document.getElementById('generic-modal');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'generic-modal';
+      el.className = 'generic-modal-overlay';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `
+      <div class="generic-modal-box">
+        <h3 style="${isError?'color:var(--red);':''}">${escapeHtml(title)}</h3>
+        <div class="generic-modal-body">${bodyHtml}</div>
+        <button class="btn" onclick="app_closeModal()">OK</button>
+      </div>`;
+    el.style.display = 'flex';
+  }
+  window.app_closeModal = function(){
+    const el = document.getElementById('generic-modal');
+    if(el) el.style.display = 'none';
+  };
+  function showError(err){ showModal('Something went wrong', escapeHtml(err.message || String(err)), true); }
 
   function render(){
     if(view==='role') return renderRole();
@@ -1026,20 +1050,36 @@
   window.app_testConnection = async function(btn){
     const original = btn ? btn.textContent : null;
     if(btn){ btn.textContent = 'Testing…'; btn.disabled = true; }
+    const lines = [];
+    // Test 1: GET (doGet)
     try{
       const controller = new AbortController();
       const timeoutId = setTimeout(()=>controller.abort(), 10000);
       const res = await fetch(API_URL, { method:'GET', signal: controller.signal });
       clearTimeout(timeoutId);
       const text = await res.text();
-      let pretty = text;
-      try{ pretty = JSON.stringify(JSON.parse(text), null, 2); }catch(e){}
-      alert('Connection test\n\nHTTP status: ' + res.status + '\n\nResponse:\n' + pretty.slice(0,600));
+      lines.push(`<strong>GET (doGet):</strong> HTTP ${res.status} — ${res.ok ? '✅ reachable' : '⚠ unexpected status'}`);
+      lines.push(`<div class="mono" style="font-size:12px; white-space:pre-wrap; margin:4px 0 12px;">${escapeHtml(text.slice(0,300))}</div>`);
     }catch(e){
       const reason = e.name==='AbortError' ? 'Timed out after 10s — Google never responded.' : e.message;
-      alert('Connection test failed\n\n' + reason + '\n\nCheck: Apps Script is deployed with "Who has access: Anyone", and the API_URL in app.js matches your deployment exactly.');
-    }finally{
-      if(btn){ btn.textContent = original; btn.disabled = false; }
+      lines.push(`<strong>GET (doGet):</strong> ❌ Failed — ${escapeHtml(reason)}`);
     }
+    // Test 2: POST (doPost, the pathway saveTest/getResults etc. actually use)
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(()=>controller.abort(), 10000);
+      const res = await fetch(API_URL, { method:'POST', body: JSON.stringify({action:'listTestsForTeacher', payload:{}}), signal: controller.signal });
+      clearTimeout(timeoutId);
+      const text = await res.text();
+      let ok = false, preview = text;
+      try{ const j = JSON.parse(text); ok = !j.error; preview = JSON.stringify(j).slice(0,200); }catch(e){}
+      lines.push(`<strong>POST (doPost):</strong> HTTP ${res.status} — ${ok ? '✅ working correctly' : '⚠ responded, but with an error/unexpected body'}`);
+      lines.push(`<div class="mono" style="font-size:12px; white-space:pre-wrap; margin:4px 0;">${escapeHtml(preview)}</div>`);
+    }catch(e){
+      const reason = e.name==='AbortError' ? 'Timed out after 10s — Google never responded.' : e.message;
+      lines.push(`<strong>POST (doPost):</strong> ❌ Failed — ${escapeHtml(reason)}`);
+    }
+    showModal('Connection test', lines.join(''));
+    if(btn){ btn.textContent = original; btn.disabled = false; }
   };
 })();
