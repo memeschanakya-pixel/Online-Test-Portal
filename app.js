@@ -7,6 +7,10 @@
   ==================================================================== */
   const API_URL = "https://script.google.com/macros/s/AKfycbzDzGvbB1NrGRvICQ-G63rrzds66Inesxl_YiI8WUN7GVPdbbqXeu_qjOTwRuxNzv_QGg/exec";
 
+  // Bump this any time you deploy a new app.js — shown in the footer, so you
+  // can always confirm at a glance whether your latest upload is actually live.
+  const APP_VERSION = 'v4';
+
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
 
@@ -39,12 +43,12 @@
       throw new Error('The teacher/student portal isn\'t connected to a database yet — paste your Google Apps Script URL into API_URL at the top of app.js.');
     }
     const controller = new AbortController();
-    const timeoutId = setTimeout(()=>controller.abort(), 20000);
+    const timeoutId = setTimeout(()=>controller.abort(), 12000);
     let res;
     try{
       res = await fetch(API_URL, { method:'POST', body: JSON.stringify({ action, payload }), signal: controller.signal });
     }catch(err){
-      if(err.name==='AbortError') throw new Error('The request to Google timed out after 20s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).');
+      if(err.name==='AbortError') throw new Error('The request to Google timed out after 12s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).');
       throw new Error('Network request failed: ' + err.message + '. Check the API_URL at the top of app.js is correct and the deployment is live.');
     }finally{
       clearTimeout(timeoutId);
@@ -67,7 +71,9 @@
     if(h>0) return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
   }
-  function setLoading(msg){ app.innerHTML = `<div class="helper" style="padding:40px 0;">${escapeHtml(msg||'Loading…')}</div>`; }
+  function setLoading(msg){
+    app.innerHTML = `<div class="loading-row"><span class="spinner"></span><span class="helper">${escapeHtml(msg||'Loading…')}</span></div>`;
+  }
   function showError(err){ alert(err.message || String(err)); }
 
   function render(){
@@ -1000,6 +1006,7 @@
 
   /* ============ INIT ============ */
   (function init(){
+    injectDiagnosticsFooter();
     const params = new URLSearchParams(window.location.search);
     const r = params.get('role');
     const isStudentLink = params.get(STUDENT_LINK_KEY) === STUDENT_LINK_VALUE || r==='student';
@@ -1007,4 +1014,32 @@
     else if(r==='teacher'){ window.app_goTeacher(); }
     else { render(); }
   })();
+
+  // Always-visible version stamp + one-click backend health check, so you never
+  // have to guess whether a new upload is actually live or whether Google is reachable.
+  function injectDiagnosticsFooter(){
+    const el = document.createElement('div');
+    el.id = 'diag-footer';
+    el.innerHTML = `<span class="mono">${APP_VERSION}</span><button type="button" onclick="app_testConnection(this)">Test connection</button>`;
+    document.body.appendChild(el);
+  }
+  window.app_testConnection = async function(btn){
+    const original = btn ? btn.textContent : null;
+    if(btn){ btn.textContent = 'Testing…'; btn.disabled = true; }
+    try{
+      const controller = new AbortController();
+      const timeoutId = setTimeout(()=>controller.abort(), 10000);
+      const res = await fetch(API_URL, { method:'GET', signal: controller.signal });
+      clearTimeout(timeoutId);
+      const text = await res.text();
+      let pretty = text;
+      try{ pretty = JSON.stringify(JSON.parse(text), null, 2); }catch(e){}
+      alert('Connection test\n\nHTTP status: ' + res.status + '\n\nResponse:\n' + pretty.slice(0,600));
+    }catch(e){
+      const reason = e.name==='AbortError' ? 'Timed out after 10s — Google never responded.' : e.message;
+      alert('Connection test failed\n\n' + reason + '\n\nCheck: Apps Script is deployed with "Who has access: Anyone", and the API_URL in app.js matches your deployment exactly.');
+    }finally{
+      if(btn){ btn.textContent = original; btn.disabled = false; }
+    }
+  };
 })();
