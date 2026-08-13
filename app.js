@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v6';
+  const APP_VERSION = 'v7';
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -301,7 +301,7 @@
   };
 
   function renderTeacherResultsInner(testId, loadError){
-    const rows = teacherResultsCache.map(r=>`
+    const rows = teacherResultsCache.map((r,idx)=>`
       <tr class="${r.violations>0?'flagged':''}">
         <td>${escapeHtml(r.studentName)}</td>
         <td>${escapeHtml(r.rollNo||'—')}</td>
@@ -312,6 +312,7 @@
         <td>${fmtTime(r.timeTakenSec)}</td>
         <td>${r.violations>0 ? `<span class="status-pill wrong">${r.violations} flag${r.violations>1?'s':''}</span>` : '—'}</td>
         <td>${new Date(r.date).toLocaleString()}</td>
+        <td>${r.perQuestion && r.perQuestion.length ? `<button class="btn secondary small" onclick="app_viewStudentAnswers(${idx})">View answers</button>` : '—'}</td>
       </tr>
     `).join('');
     app.innerHTML = `
@@ -321,12 +322,34 @@
       <div class="helper" style="margin-bottom:16px;">"Flags" mean the student exited fullscreen or switched tabs during the attempt.</div>
       ${teacherResultsCache.length===0 ? `<div class="empty-state"><h3>No attempts yet</h3><div>Results will appear here once students submit the test.</div></div>` : `
       <table class="subj-table">
-        <thead><tr><th>Name</th><th>Roll no.</th><th>Score</th><th>Correct</th><th>Wrong</th><th>Unatt.</th><th>Time</th><th>Flags</th><th>Submitted</th></tr></thead>
+        <thead><tr><th>Name</th><th>Roll no.</th><th>Score</th><th>Correct</th><th>Wrong</th><th>Unatt.</th><th>Time</th><th>Flags</th><th>Submitted</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`}
       `}
     `;
   }
+
+  window.app_viewStudentAnswers = function(idx){
+    const r = teacherResultsCache[idx];
+    if(!r || !r.perQuestion) return;
+    const body = r.perQuestion.map(pq=>{
+      const yourAns = pq.sel===null||pq.sel===undefined ? '<em>Not attempted</em>' : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`;
+      const correctAns = `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
+      const pillClass = pq.status==='correct'?'correct':pq.status==='wrong'?'wrong':'skip';
+      const pillLabel = pq.status==='correct'?'Correct':pq.status==='wrong'?'Wrong':'Skipped';
+      return `
+        <div class="review-item" style="text-align:left;">
+          <div class="review-item-head">
+            <strong>Q${pq.i+1}. ${escapeHtml(pq.subject||'General')}</strong>
+            <span class="status-pill ${pillClass}">${pillLabel}</span>
+          </div>
+          <div>${escapeHtml(pq.text)}</div>
+          <div class="ans-line"><span class="lbl">Answered:</span>${yourAns}</div>
+          ${pq.status!=='correct' ? `<div class="ans-line"><span class="lbl">Correct answer:</span>${correctAns}</div>` : ''}
+        </div>`;
+    }).join('');
+    showModal(`${r.studentName}${r.rollNo ? ' · '+r.rollNo : ''} — ${r.score}/${r.total}`, body);
+  };
 
   /* ============ BUILDER (teacher) ============ */
   function renderBuilder(){
