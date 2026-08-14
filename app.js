@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v8';
+  const APP_VERSION = 'v10';
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -100,7 +100,9 @@
   };
   function showError(err){ showModal('Something went wrong', escapeHtml(err.message || String(err)), true); }
 
+  const TEACHER_VIEWS = ['role','teacher-pin','teacher-home','builder','teacher-results'];
   function render(){
+    updateDiagFooterVisibility();
     if(view==='role') return renderRole();
     if(view==='teacher-pin') return renderTeacherPin();
     if(view==='teacher-home') return renderTeacherHome();
@@ -111,6 +113,12 @@
     if(view==='player') return renderPlayer();
     if(view==='result') return renderResult();
     if(view==='submit-error') return renderSubmitError();
+  }
+  function updateDiagFooterVisibility(){
+    const el = document.getElementById('diag-footer');
+    if(!el) return;
+    // Only visible on teacher screens — students never see the debug badge/button.
+    el.style.display = TEACHER_VIEWS.includes(view) ? 'flex' : 'none';
   }
 
   function topbar(tag, backFn){
@@ -755,7 +763,7 @@
           <label>Test code</label>
           <input id="s-code" placeholder="Code from your teacher">
         </div>
-        <button class="btn" onclick="app_lookupTest()">Continue</button>
+        <button class="btn" id="s-continue-btn" onclick="app_lookupTest()">Continue</button>
         <div id="s-error" class="helper" style="color:var(--red); margin-top:10px;"></div>
       </div>
     `;
@@ -765,20 +773,24 @@
     const roll = document.getElementById('s-roll').value.trim();
     const code = document.getElementById('s-code').value.trim();
     const errEl = document.getElementById('s-error');
+    const btn = document.getElementById('s-continue-btn');
     errEl.textContent='';
     if(!name){ errEl.textContent='Enter your name to continue.'; return; }
     if(!code){ errEl.textContent='Enter the test code your teacher gave you.'; return; }
+    if(btn){ btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Checking…'; }
     try{
-      const data = await apiCall('getTestForStudent', {id: code});
-      studentTest = data.test;
+      const [testData, progressData] = await Promise.all([
+        apiCall('getTestForStudent', {id: code}),
+        apiCall('getProgress', {testId: code, studentName: name, rollNo: roll}).catch(()=>({progress:null}))
+      ]);
+      studentTest = testData.test;
       studentInfo = {name, rollNo: roll};
-      resumedProgress = null;
-      try{
-        const pData = await apiCall('getProgress', {testId: code, studentName: name, rollNo: roll});
-        if(pData.progress) resumedProgress = pData.progress;
-      }catch(e){ /* non-fatal — just start fresh if this check fails */ }
+      resumedProgress = progressData.progress || null;
       view='student-rules'; render();
-    }catch(e){ errEl.textContent = e.message; }
+    }catch(e){
+      errEl.textContent = e.message;
+      if(btn){ btn.disabled = false; btn.innerHTML = 'Continue'; }
+    }
   };
 
   /* ============ STUDENT RULES / LOCKDOWN NOTICE ============ */
@@ -801,12 +813,14 @@
           <li>The timer auto-submits your test when it reaches zero.</li>
           <li>Your answers are <strong>saved automatically</strong> as you go — closing the tab by accident won't lose your progress.</li>
         </ul>
-        <button class="btn" onclick="app_beginTest()">${resumedProgress?'Resume test (fullscreen)':'Begin test (fullscreen)'}</button>
+        <button class="btn" id="s-begin-btn" onclick="app_beginTest()">${resumedProgress?'Resume test (fullscreen)':'Begin test (fullscreen)'}</button>
       </div>
     `;
   }
 
   window.app_beginTest = async function(){
+    const btn = document.getElementById('s-begin-btn');
+    if(btn){ btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Starting…'; }
     const el = document.documentElement;
     try{
       if(el.requestFullscreen) await el.requestFullscreen();
