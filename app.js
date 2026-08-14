@@ -9,10 +9,9 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v13';
+  const APP_VERSION = 'v14';
 
   const MAX_VIOLATIONS = 3;
-  const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
 
   // Short, non-obvious student-link key — doesn't say "student" anywhere.
   // Change this string any time to invalidate old shared links.
@@ -38,17 +37,18 @@
   const app = document.getElementById('app');
 
   /* ============ API ============ */
-  async function apiCall(action, payload){
+  async function apiCall(action, payload, timeoutMs){
     if(!API_URL || API_URL.indexOf('PASTE_YOUR') === 0){
       throw new Error('The teacher/student portal isn\'t connected to a database yet — paste your Google Apps Script URL into API_URL at the top of app.js.');
     }
     const controller = new AbortController();
-    const timeoutId = setTimeout(()=>controller.abort(), 12000);
+    const effectiveTimeout = timeoutMs || 12000;
+    const timeoutId = setTimeout(()=>controller.abort(), effectiveTimeout);
     let res;
     try{
       res = await fetch(API_URL, { method:'POST', body: JSON.stringify({ action, payload }), signal: controller.signal });
     }catch(err){
-      if(err.name==='AbortError') throw new Error('The request to Google timed out after 12s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).');
+      if(err.name==='AbortError') throw new Error(`The request to Google timed out after ${Math.round(effectiveTimeout/1000)}s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).`);
       throw new Error('Network request failed: ' + err.message + '. Check the API_URL at the top of app.js is correct and the deployment is live.');
     }finally{
       clearTimeout(timeoutId);
@@ -551,13 +551,21 @@
         </div>
         <label style="display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin-bottom:6px;">Question text</label>
         <textarea data-field="text" placeholder="Type or paste the question text here…">${escapeHtml(q.text||'')}</textarea>
+        ${q.image ? `
         <div class="img-row">
+          <img src="${q.image}" alt="question image">
+          <button class="btn danger small" data-field="removeImage">Remove image</button>
+        </div>
+        ` : `
+        <div class="image-dropzone">
+          <div>Drag &amp; drop an image here</div>
+          <div class="helper" style="margin:6px 0;">or</div>
           <label class="btn secondary small" style="margin:0;">
-            Attach image
+            Browse file
             <input type="file" accept="image/*" data-field="image" style="display:none;">
           </label>
-          ${q.image ? `<img src="${q.image}" alt="question image"><button class="btn danger small" data-field="removeImage">Remove image</button>` : `<span>Optional — keep it small, Google Sheets has a cell size limit</span>`}
         </div>
+        `}
         <label style="display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin:10px 0 6px;">Options — mark the correct one</label>
         ${[0,1,2,3].map(oi=>`
           <div class="opt-row">
@@ -642,6 +650,24 @@
     if(qList){
       qList.addEventListener('input', onQFieldChange);
       qList.addEventListener('change', onQFieldChange);
+      qList.addEventListener('dragover', (e)=>{
+        const zone = e.target.closest('.image-dropzone');
+        if(zone){ e.preventDefault(); zone.classList.add('drag-over'); }
+      });
+      qList.addEventListener('dragleave', (e)=>{
+        const zone = e.target.closest('.image-dropzone');
+        if(zone) zone.classList.remove('drag-over');
+      });
+      qList.addEventListener('drop', (e)=>{
+        const zone = e.target.closest('.image-dropzone');
+        if(!zone) return;
+        e.preventDefault();
+        zone.classList.remove('drag-over');
+        const block = e.target.closest('.q-block');
+        const i = parseInt(block.dataset.qi);
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if(file) handleImageFile(i, file);
+      });
       qList.querySelectorAll('[data-field="removeImage"]').forEach(btn=>{
         btn.onclick = (e)=>{
           const i = parseInt(e.target.closest('.q-block').dataset.qi);
@@ -652,6 +678,28 @@
     }
     const csvInput = document.getElementById('csv-import-input');
     if(csvInput) csvInput.onchange = onCsvFileChosen;
+  }
+
+  // Uploads a question image to Google Drive (via Apps Script) and stores the
+  // resulting link — used by both drag-and-drop and the "Browse file" fallback.
+  async function handleImageFile(i, file){
+    if(!file.type.startsWith('image/')){ showModal('Not an image', 'Please choose an image file (JPG, PNG, etc).', true); return; }
+    if(file.size > 5*1024*1024){ showModal('Image too large', 'Please use an image under 5MB.', true); return; }
+    const zone = document.querySelector(`.q-block[data-qi="${i}"] .image-dropzone`);
+    if(zone) zone.innerHTML = '<div class="loading-row" style="padding:6px 0;"><span class="spinner"></span><span class="helper">Uploading…</span></div>';
+    const reader = new FileReader();
+    reader.onload = async ()=>{
+      try{
+        const base64 = reader.result.split(',')[1];
+        const data = await apiCall('uploadImage', { filename: file.name, mimeType: file.type, data: base64 }, 30000);
+        builder.questions[i].image = data.url;
+      }catch(e){
+        showError(e);
+      }
+      renderBuilder();
+    };
+    reader.onerror = ()=>{ showModal('Couldn\'t read that file', 'Please try again.', true); renderBuilder(); };
+    reader.readAsDataURL(file);
   }
 
   /* ============ CSV IMPORT ============ */
@@ -773,17 +821,7 @@
     else if(field==='correct'){ q.correct = parseInt(e.target.value); }
     else if(field==='image'){
       const file = e.target.files[0];
-      if(file){
-        const reader = new FileReader();
-        reader.onload = ()=>{
-          if(reader.result.length > MAX_IMAGE_CHARS){
-            alert('That image is too large for Google Sheets storage. Please crop or compress it and try again (keep it under ~30KB).');
-            return;
-          }
-          q.image = reader.result; renderBuilder();
-        };
-        reader.readAsDataURL(file);
-      }
+      if(file) handleImageFile(i, file);
     }
   }
 
