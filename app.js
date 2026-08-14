@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v11';
+  const APP_VERSION = 'v13';
 
   const MAX_VIOLATIONS = 3;
   const MAX_IMAGE_CHARS = 45000; // Google Sheets cell limit is ~50,000 chars
@@ -298,13 +298,14 @@
   }
 
   window.app_newTest = function(){
-    builder = { id: genTestCode(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, active:true, questions:[], createdAt: Date.now() };
+    builder = { id: genTestCode(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, active:true, showResultToStudent:false, questions:[], createdAt: Date.now() };
     view='builder'; render();
   };
   window.app_editTest = function(id){
     const t = teacherTests.find(x=>x.id===id);
     builder = JSON.parse(JSON.stringify(t));
     if(builder.negativeMarking===undefined) builder.negativeMarking = builder.marksWrong>0;
+    if(builder.showResultToStudent===undefined) builder.showResultToStudent = false;
     view='builder'; render();
   };
   window.app_deleteTest = async function(id){
@@ -599,6 +600,16 @@
             <input id="b-marks-wrong" type="number" step="0.25" value="${builder.marksWrong}">
           </div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Show result to students after they submit</label>
+            <select id="b-show-result-toggle">
+              <option value="yes" ${builder.showResultToStudent===true?'selected':''}>Yes — score &amp; answer review</option>
+              <option value="no" ${builder.showResultToStudent!==true?'selected':''}>No — just confirm submission</option>
+            </select>
+          </div>
+        </div>
+        <div class="helper" style="margin:-6px 0 16px;">${builder.showResultToStudent!==true ? 'Students will only see "Your test has been submitted." Scores are still saved and visible to you under Results.' : 'Students see their score and full answer review immediately after submitting.'}</div>
 
         <div id="q-list">${qBlocks || '<div class="helper" style="margin:16px 0;">No questions yet. Add your first question below, or import many at once from a CSV file.</div>'}</div>
 
@@ -625,6 +636,7 @@
     const wrongField = document.getElementById('b-marks-wrong');
     if(wrongField) wrongField.oninput = e=> builder.marksWrong = parseFloat(e.target.value)||0;
     document.getElementById('b-neg-toggle').onchange = e=>{ builder.negativeMarking = e.target.value==='yes'; renderBuilder(); };
+    document.getElementById('b-show-result-toggle').onchange = e=>{ builder.showResultToStudent = e.target.value==='yes'; renderBuilder(); };
 
     const qList = document.getElementById('q-list');
     if(qList){
@@ -1178,6 +1190,22 @@
   /* ============ RESULT (student view, server-scored) ============ */
   function renderResult(){
     const r = resultData;
+
+    if(r.hidden){
+      app.innerHTML = `
+        ${topbar('Submitted')}
+        <div class="panel" style="max-width:480px; margin:0 auto; text-align:center;">
+          <h2 class="section-title">Your test has been submitted</h2>
+          <div class="helper" style="margin:12px 0 4px;">${escapeHtml(r.testTitle||'')}</div>
+          <div class="helper" style="margin-top:14px;">Your teacher has chosen not to show scores immediately. They'll share your result with you separately.</div>
+          <div class="top-actions" style="margin-top:22px; justify-content:center;">
+            <button class="btn secondary" onclick="app_backToRole()">Done</button>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
     const subjRows = Object.entries(r.perSubject).map(([name,s])=>`
       <tr>
         <td>${escapeHtml(name)}</td><td>${s.total}</td><td>${s.correct}</td><td>${s.wrong}</td><td>${s.unattempted}</td><td class="mono">${s.marks}</td>
