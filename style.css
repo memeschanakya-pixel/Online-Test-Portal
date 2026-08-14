@@ -269,3 +269,13 @@ tr.flagged{background:var(--red-soft);}
 /* ---------- Inactive test card ---------- */
 .inactive-card{ opacity:0.7; }
 .inactive-card .test-code{ background:var(--paper-dim); border-color:var(--line); }
+
+/* ---------- Image drag-and-drop zone (builder) ---------- */
+.image-dropzone{
+  border:2px dashed var(--line); border-radius:var(--radius); padding:20px;
+  text-align:center; color:var(--ink-soft); font-size:13.5px; margin:8px 0 10px;
+  transition:border-color .15s, background .15s;
+}
+.image-dropzone.drag-over{
+  border-color:var(--ink); background:var(--gold-soft);
+}
