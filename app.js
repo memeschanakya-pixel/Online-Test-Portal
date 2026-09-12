@@ -9,7 +9,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v17';
+  const APP_VERSION = 'v19';
 
   const MAX_VIOLATIONS = 3;
 
@@ -317,14 +317,13 @@
   }
 
   window.app_newTest = function(){
-    builder = { id: genTestCode(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, active:true, showResultToStudent:false, questions:[], createdAt: Date.now() };
+    builder = { id: genTestCode(), title:'', duration:60, marksCorrect:4, marksWrong:1, negativeMarking:true, active:true, questions:[], createdAt: Date.now() };
     view='builder'; render();
   };
   window.app_editTest = function(id){
     const t = teacherTests.find(x=>x.id===id);
     builder = JSON.parse(JSON.stringify(t));
     if(builder.negativeMarking===undefined) builder.negativeMarking = builder.marksWrong>0;
-    if(builder.showResultToStudent===undefined) builder.showResultToStudent = false;
     view='builder'; render();
   };
   window.app_deleteTest = async function(id){
@@ -455,8 +454,9 @@
     const r = teacherResultsCache.find(x=>x.id===id);
     if(!r || !r.perQuestion) return;
     const body = r.perQuestion.map(pq=>{
-      const yourAns = pq.sel===null||pq.sel===undefined ? '<em>Not attempted</em>' : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`;
-      const correctAns = `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
+      const isNum = pq.type==='numerical';
+      const yourAns = pq.sel===null||pq.sel===undefined ? '<em>Not attempted</em>' : (isNum ? escapeHtml(String(pq.sel)) : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`);
+      const correctAns = isNum ? escapeHtml(String(pq.correct)) : `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
       const pillClass = pq.status==='correct'?'correct':pq.status==='wrong'?'wrong':'skip';
       const pillLabel = pq.status==='correct'?'Correct':pq.status==='wrong'?'Wrong':'Skipped';
       return `
@@ -499,14 +499,15 @@
     if(!withDetail){ showModal('Nothing to export', 'No scored responses are available yet — click "Generate results" first.'); return; }
     const qCount = withDetail.perQuestion.length;
     const header = ['Name','Roll No', ...Array.from({length:qCount},(_,i)=>'Q.'+(i+1)), 'Correct','Incorrect','Left'];
-    const answerKeyRow = ['Answer Key','', ...withDetail.perQuestion.map(pq=>String.fromCharCode(65+pq.correct)), '', '', ''];
+    const answerKeyRow = ['Answer Key','', ...withDetail.perQuestion.map(pq=>pq.type==='numerical' ? String(pq.correct) : String.fromCharCode(65+pq.correct)), '', '', ''];
     const rows = results.map(r=>{
       const byIndex = {};
       (r.perQuestion||[]).forEach(pq=>{ byIndex[pq.i] = pq; });
       const answers = Array.from({length:qCount},(_,i)=>{
         const pq = byIndex[i];
         if(!pq) return '';
-        return pq.sel===null||pq.sel===undefined ? '-' : String.fromCharCode(65+pq.sel);
+        if(pq.sel===null||pq.sel===undefined) return '-';
+        return pq.type==='numerical' ? String(pq.sel) : String.fromCharCode(65+pq.sel);
       });
       return [r.studentName, r.rollNo||'', ...answers, r.scored ? r.correct : '', r.scored ? r.wrong : '', r.scored ? r.unattempted : ''];
     });
@@ -522,8 +523,9 @@
 
     const detailSections = results.map(r=>{
       const qRows = (r.perQuestion||[]).map(pq=>{
-        const yourAns = pq.sel===null||pq.sel===undefined ? 'Not attempted' : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`;
-        const correctAns = `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
+        const isNum = pq.type==='numerical';
+        const yourAns = pq.sel===null||pq.sel===undefined ? 'Not attempted' : (isNum ? escapeHtml(String(pq.sel)) : `${String.fromCharCode(65+pq.sel)}. ${escapeHtml(pq.options[pq.sel])}`);
+        const correctAns = isNum ? escapeHtml(String(pq.correct)) : `${String.fromCharCode(65+pq.correct)}. ${escapeHtml(pq.options[pq.correct])}`;
         return `<tr><td>${pq.i+1}</td><td>${escapeHtml(pq.subject||'')}</td><td>${escapeHtml(pq.text)}</td><td>${yourAns}</td><td>${correctAns}</td><td>${pq.status}</td></tr>`;
       }).join('');
       return `
@@ -603,6 +605,26 @@
           </label>
         </div>
         `}
+        <div class="field" style="margin-bottom:10px; max-width:220px;">
+          <label>Question type</label>
+          <select data-field="qtype">
+            <option value="mcq" ${(!q.type||q.type==='mcq')?'selected':''}>MCQ (4 options)</option>
+            <option value="numerical" ${q.type==='numerical'?'selected':''}>Numerical / Integer answer</option>
+          </select>
+        </div>
+        ${q.type==='numerical' ? `
+        <label style="display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin:10px 0 6px;">Correct numeric answer</label>
+        <div class="field-row" style="margin-bottom:4px;">
+          <div class="field" style="max-width:180px;">
+            <input type="text" inputmode="decimal" data-field="numericCorrect" value="${escapeHtml(q.correct!==null&&q.correct!==undefined?q.correct:'')}" placeholder="e.g. 12 or 3.5">
+          </div>
+          <div class="field" style="max-width:180px;">
+            <label style="font-size:11px;">Tolerance (± , optional)</label>
+            <input type="text" inputmode="decimal" data-field="tolerance" value="${escapeHtml(q.tolerance!==null&&q.tolerance!==undefined?q.tolerance:'')}" placeholder="0">
+          </div>
+        </div>
+        <div class="helper" style="margin:0 0 10px;">Student sees a plain number input, no options. Leave tolerance blank for an exact match, or set e.g. 0.1 to allow decimal rounding.</div>
+        ` : `
         <label style="display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin:10px 0 6px;">Options — mark the correct one</label>
         ${[0,1,2,3].map(oi=>`
           <div class="opt-row">
@@ -611,6 +633,7 @@
             <input type="text" data-field="opt${oi}" value="${escapeHtml(q.options[oi]||'')}" placeholder="Option ${String.fromCharCode(65+oi)}">
           </div>
         `).join('')}
+        `}
       </div>
     `).join('');
 
@@ -645,16 +668,7 @@
             <input id="b-marks-wrong" type="number" step="0.25" value="${builder.marksWrong}">
           </div>
         </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Show result to students after they submit</label>
-            <select id="b-show-result-toggle">
-              <option value="yes" ${builder.showResultToStudent===true?'selected':''}>Yes — score &amp; answer review</option>
-              <option value="no" ${builder.showResultToStudent!==true?'selected':''}>No — just confirm submission</option>
-            </select>
-          </div>
-        </div>
-        <div class="helper" style="margin:-6px 0 16px;">${builder.showResultToStudent!==true ? 'Students will only see "Your test has been submitted." Scores are still saved and visible to you under Results.' : 'Students see their score and full answer review immediately after submitting.'}</div>
+        <div class="helper" style="margin:-6px 0 16px;">Students only see "Your test has been submitted." Scores appear once you click "Generate results" under that test's Results page.</div>
 
         <div id="q-list">${qBlocks || '<div class="helper" style="margin:16px 0;">No questions yet. Add your first question below, or import many at once from a CSV file.</div>'}</div>
 
@@ -666,7 +680,7 @@
           </label>
           <button class="btn secondary" onclick="app_downloadCsvTemplate()">Download CSV template</button>
         </div>
-        <div class="helper" style="margin-top:8px;">CSV columns: Subject, Question, OptionA, OptionB, OptionC, OptionD, CorrectOption (A/B/C/D), ImageURL (optional, a public image link).</div>
+        <div class="helper" style="margin-top:8px;">CSV columns: Subject, Question, Type (blank/MCQ or Numerical), OptionA–D, CorrectOption (A/B/C/D for MCQ, or the number for Numerical), Tolerance (optional, numerical only), ImageURL (optional).</div>
 
         <div style="margin-top:24px; border-top:1px solid var(--line); padding-top:18px; display:flex; gap:10px;">
           <button class="btn" onclick="app_saveTest()">Save test</button>
@@ -681,7 +695,6 @@
     const wrongField = document.getElementById('b-marks-wrong');
     if(wrongField) wrongField.oninput = e=> builder.marksWrong = parseFloat(e.target.value)||0;
     document.getElementById('b-neg-toggle').onchange = e=>{ builder.negativeMarking = e.target.value==='yes'; renderBuilder(); };
-    document.getElementById('b-show-result-toggle').onchange = e=>{ builder.showResultToStudent = e.target.value==='yes'; renderBuilder(); };
 
     const qList = document.getElementById('q-list');
     if(qList){
@@ -740,7 +753,7 @@
   }
 
   /* ============ CSV IMPORT ============ */
-  const CSV_HEADERS = ['Subject','Question','OptionA','OptionB','OptionC','OptionD','CorrectOption','ImageURL'];
+  const CSV_HEADERS = ['Subject','Question','Type','OptionA','OptionB','OptionC','OptionD','CorrectOption','Tolerance','ImageURL'];
 
   function parseCSV(text){
     const rows = [];
@@ -778,6 +791,10 @@
     reader.readAsText(file);
   }
 
+  // Type column is optional — omit it (or leave blank) and every row is
+  // treated as MCQ, same as before. Use "Numerical" to mark a row as a
+  // JEE-style integer/decimal-answer question (put the correct number
+  // straight into CorrectOption instead of a letter; options can be blank).
   function importQuestionsFromCsv(text){
     const rows = parseCSV(text);
     if(rows.length < 2){ alert('That CSV has no question rows below the header.'); return; }
@@ -785,15 +802,17 @@
     const idx = {
       subject: header.indexOf('subject'),
       question: header.indexOf('question'),
+      type: header.indexOf('type'),
       a: header.indexOf('optiona'),
       b: header.indexOf('optionb'),
       c: header.indexOf('optionc'),
       d: header.indexOf('optiond'),
       correct: header.indexOf('correctoption'),
+      tolerance: header.indexOf('tolerance'),
       image: header.indexOf('imageurl')
     };
-    if(idx.question<0 || idx.a<0 || idx.b<0 || idx.c<0 || idx.d<0 || idx.correct<0){
-      alert('That CSV is missing required columns. Expected: ' + CSV_HEADERS.join(', '));
+    if(idx.question<0 || idx.correct<0){
+      alert('That CSV is missing required columns. Expected at least: Question, CorrectOption.');
       return;
     }
     const correctMap = {A:0,B:1,C:2,D:3};
@@ -803,17 +822,38 @@
       const row = rows[r];
       const text = (row[idx.question]||'').trim();
       if(!text) continue;
+      const typeRaw = idx.type>=0 ? (row[idx.type]||'').trim().toLowerCase() : '';
+      const isNumerical = typeRaw==='numerical' || typeRaw==='integer' || typeRaw==='numeric';
+
+      if(isNumerical){
+        const correctVal = (row[idx.correct]||'').trim();
+        if(!correctVal){
+          skipped.push(`Row ${r+1}: ${text.slice(0,40)} — missing numeric answer in CorrectOption`);
+          continue;
+        }
+        builder.questions.push({
+          id: uid(),
+          subject: idx.subject>=0 ? (row[idx.subject]||'').trim() : '',
+          text, type:'numerical',
+          image: idx.image>=0 && (row[idx.image]||'').trim() ? (row[idx.image]||'').trim() : null,
+          options:['1','2','3','4'], correct: correctVal,
+          tolerance: idx.tolerance>=0 ? (row[idx.tolerance]||'').trim() : ''
+        });
+        imported++;
+        continue;
+      }
+
       const opts = [row[idx.a], row[idx.b], row[idx.c], row[idx.d]].map(v=>(v||'').trim());
       const correctLetter = (row[idx.correct]||'').trim().toUpperCase();
       const correct = correctMap[correctLetter];
-      if(opts.some(o=>!o) || correct===undefined){
-        skipped.push(`Row ${r+1}: ${text.slice(0,40) || '(blank question)'}`);
+      if(idx.a<0 || idx.b<0 || idx.c<0 || idx.d<0 || opts.some(o=>!o) || correct===undefined){
+        skipped.push(`Row ${r+1}: ${text.slice(0,40) || '(blank question)'} — missing options or invalid CorrectOption letter`);
         continue;
       }
       builder.questions.push({
         id: uid(),
         subject: idx.subject>=0 ? (row[idx.subject]||'').trim() : '',
-        text,
+        text, type:'mcq',
         image: idx.image>=0 && (row[idx.image]||'').trim() ? (row[idx.image]||'').trim() : null,
         options: opts,
         correct
@@ -822,13 +862,14 @@
     }
     renderBuilder();
     let msg = `Imported ${imported} question${imported!==1?'s':''}.`;
-    if(skipped.length) msg += `\n\nSkipped ${skipped.length} row(s) with missing options or an invalid CorrectOption letter:\n` + skipped.slice(0,10).join('\n') + (skipped.length>10?'\n…':'');
+    if(skipped.length) msg += `\n\nSkipped ${skipped.length} row(s):\n` + skipped.slice(0,10).join('\n') + (skipped.length>10?'\n…':'');
     alert(msg);
   }
 
   window.app_downloadCsvTemplate = function(){
-    const exampleRow = ['Physics','Example: What is the SI unit of force?','Newton','Joule','Watt','Pascal','A',''];
-    const csvRows = [CSV_HEADERS, exampleRow];
+    const exampleRow1 = ['Physics','Example MCQ: What is the SI unit of force?','MCQ','Newton','Joule','Watt','Pascal','A','',''];
+    const exampleRow2 = ['Physics','Example Numerical: Value of g in m/s\u00b2 (nearest integer)','Numerical','','','','','10','0',''];
+    const csvRows = [CSV_HEADERS, exampleRow1, exampleRow2];
     const csvText = csvRows.map(r => r.map(csvEscape).join(',')).join('\r\n');
     downloadTextFile(csvText, 'question-upload-template.csv', 'text/csv');
   };
@@ -856,6 +897,14 @@
     else if(field==='text'){ q.text = e.target.value; }
     else if(field.startsWith('opt')){ q.options[parseInt(field.slice(3))] = e.target.value; }
     else if(field==='correct'){ q.correct = parseInt(e.target.value); }
+    else if(field==='qtype'){
+      q.type = e.target.value;
+      q.correct = null; // reset — mcq uses an option index, numerical uses a number string
+      renderBuilder();
+      return;
+    }
+    else if(field==='numericCorrect'){ q.correct = e.target.value; }
+    else if(field==='tolerance'){ q.tolerance = e.target.value; }
     else if(field==='image'){
       const file = e.target.files[0];
       if(file) handleImageFile(i, file);
@@ -867,7 +916,7 @@
     // 1/2/3/4 for options) so a rushed test can be saved with just an image —
     // no text/options/correct-answer required. Edit any of them normally, or
     // leave as-is and fix them later before generating results.
-    builder.questions.push({ id: uid(), subject:'', text:' ', image:null, options:['1','2','3','4'], correct:null });
+    builder.questions.push({ id: uid(), subject:'', text:' ', image:null, type:'mcq', options:['1','2','3','4'], correct:null, tolerance:'' });
     renderBuilder();
     setTimeout(()=>{
       const blocks = document.querySelectorAll('.q-block');
@@ -1097,8 +1146,16 @@
     const qi = attempt.current;
     const q = t.questions[qi];
     const sel = attempt.selected[qi];
+    const isNumerical = q.type==='numerical';
 
-    const optionsHtml = q.options.map((opt,oi)=>`
+    const optionsHtml = isNumerical ? `
+      <div class="numeric-answer-row">
+        <label>Enter your answer</label>
+        <input type="text" inputmode="decimal" id="numeric-answer-input" class="numeric-answer-input"
+               value="${sel!==null&&sel!==undefined?escapeHtml(sel):''}" placeholder="e.g. 12 or 3.5"
+               oninput="app_enterNumericAnswer(this.value)">
+      </div>
+    ` : q.options.map((opt,oi)=>`
       <div class="bubble-opt ${sel===oi?'selected':''}" onclick="app_selectOption(${oi})">
         <div class="bubble">${String.fromCharCode(65+oi)}</div>
         <div class="opt-text">${escapeHtml(opt)}</div>
@@ -1137,7 +1194,7 @@
       <div class="player-grid">
         <div class="qpanel">
           <div class="qmeta">
-            <span>Question ${qi+1} of ${t.questions.length}</span>
+            <span>Question ${qi+1} of ${t.questions.length}${isNumerical ? ' · Numerical' : ''}</span>
             <span>${escapeHtml(q.subject||'General')} · +${t.marksCorrect}${t.marksWrong>0 ? ' / −'+t.marksWrong : ''}</span>
           </div>
           <div class="qtext">${escapeHtml(q.text)}</div>
@@ -1161,6 +1218,10 @@
         </div>
       </div>
     `;
+    if(isNumerical){
+      const inp = document.getElementById('numeric-answer-input');
+      if(inp){ inp.focus(); const p = inp.value.length; inp.setSelectionRange(p,p); }
+    }
   }
 
   window.app_selectOption = function(oi){
@@ -1169,6 +1230,17 @@
     attempt.status[attempt.current] = st==='marked' ? 'answered-marked' : 'answered';
     scheduleSaveProgress(false);
     renderPlayer();
+  };
+  window.app_enterNumericAnswer = function(value){
+    const trimmed = value.trim();
+    attempt.selected[attempt.current] = trimmed==='' ? null : trimmed;
+    const st = attempt.status[attempt.current];
+    attempt.status[attempt.current] = trimmed==='' ? 'not-answered' : (st==='marked' ? 'answered-marked' : 'answered');
+    scheduleSaveProgress(false);
+    // Don't call renderPlayer() here — it would rebuild the input and steal
+    // focus/cursor on every keystroke. Just refresh the palette dot for this question.
+    const btn = document.querySelector(`.qbtn.current`);
+    if(btn) btn.className = `qbtn ${attempt.status[attempt.current]} current`;
   };
   window.app_clearResponse = function(){
     attempt.selected[attempt.current] = null;
