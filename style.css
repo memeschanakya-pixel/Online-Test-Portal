@@ -279,3 +279,12 @@ tr.flagged{background:var(--red-soft);}
 .image-dropzone.drag-over{
   border-color:var(--ink); background:var(--gold-soft);
 }
+
+/* ---------- Numerical/integer answer input (player) ---------- */
+.numeric-answer-row{ margin-bottom:16px; }
+.numeric-answer-row label{ display:block; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); margin-bottom:8px; }
+.numeric-answer-input{
+  width:220px; max-width:100%; padding:14px 16px; font-size:20px; font-family:'IBM Plex Mono',monospace;
+  border:1.5px solid var(--line); border-radius:var(--radius); background:var(--paper);
+}
+.numeric-answer-input:focus{ outline:2px solid var(--ink); outline-offset:1px; border-color:var(--ink); }
