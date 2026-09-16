@@ -2,14 +2,29 @@
   "use strict";
 
   /* ====================================================================
-     PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW (see Code.gs setup).
-     It looks like: https://script.google.com/macros/s/AKfycb.../exec
+     PASTE YOUR SUPABASE PROJECT URL AND ANON KEY BELOW.
+     Find both in: Supabase Dashboard > Project Settings > API.
+
+     IMPORTANT — read this once: this app talks to Supabase DIRECTLY from
+     the browser (no server-side function in between). That means:
+       - The full test, including correct answers, is present in the
+         browser's memory/network response once a student opens a test —
+         a technical student COULD find answers via DevTools' Network tab.
+       - TEACHER_PIN below is a plain value in this file — visible to
+         anyone who views the page source, same exposure as the student
+         link key. It stops casual guessing, not a determined look at the
+         code.
+     This was a deliberate simplicity-over-security tradeoff (the
+     alternative — Supabase Edge Functions — keeps both hidden server-side,
+     like the old Apps Script backend did, at the cost of more setup).
   ==================================================================== */
-  const API_URL = "https://script.google.com/macros/s/AKfycbzDzGvbB1NrGRvICQ-G63rrzds66Inesxl_YiI8WUN7GVPdbbqXeu_qjOTwRuxNzv_QGg/exec";
+  const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvbG93Z2RsYWRqeXZla3Z5eWptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyOTc3NjYsImV4cCI6MjEwNDg3Mzc2Nn0.9RU7TP5jRK0Bb2q2PdNCdQodS_sBs1zReb08cHHlXsk";
+  const TEACHER_PIN = "14091996"; // e.g. "2580" — change any time, no redeploy needed beyond re-uploading this file
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v19';
+  const APP_VERSION = 'v21';
 
   const MAX_VIOLATIONS = 3;
 
@@ -25,7 +40,7 @@
   let teacherPinError = '';
   let teacherTests = [];
   let builder = null;
-  let studentTest = null;      // stripped test (no answers) for the student taking it
+  let studentTest = null;      // full test object (see security note above — not stripped in direct-DB mode)
   let studentInfo = null;      // {name, rollNo}
   let resumedProgress = null;  // saved progress fetched on lookup, if any
   let attempt = null;
@@ -36,31 +51,176 @@
 
   const app = document.getElementById('app');
 
-  /* ============ API ============ */
+  const sbClient = (typeof window.supabase !== 'undefined' && SUPABASE_ANON_KEY.indexOf('PASTE_YOUR')!==0)
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
+
+  function progressKey(testId, studentName, rollNo){
+    return testId + '||' + studentName + '||' + (rollNo||'');
+  }
+
+  // Scoring logic — runs in the teacher's browser when they click "Generate
+  // results" (or re-click after fixing a correct answer). Same rules as
+  // before: MCQ exact match, or numerical within an optional ± tolerance.
+  function isNumericMatch(studentVal, correctVal, tolerance){
+    const s = parseFloat(String(studentVal).trim()), c = parseFloat(String(correctVal).trim());
+    if(isNaN(s) || isNaN(c)) return false;
+    let tol = parseFloat(tolerance); if(isNaN(tol) || tol<0) tol = 0;
+    return Math.abs(s-c) <= tol+1e-9;
+  }
+  function scoreSubmission(test, answers){
+    let correct=0, wrong=0, unattempted=0, marks=0;
+    const perSubject={}, perQuestion=[];
+    (test.questions||[]).forEach((q,idx)=>{
+      const subj = q.subject || 'General';
+      if(!perSubject[subj]) perSubject[subj] = {total:0,correct:0,wrong:0,unattempted:0,marks:0};
+      perSubject[subj].total++;
+      const sel = answers[idx];
+      const isNum = q.type==='numerical';
+      let status;
+      if(sel===null || sel===undefined || String(sel).trim()===''){
+        unattempted++; perSubject[subj].unattempted++; status='skip';
+      } else if(isNum ? isNumericMatch(sel,q.correct,q.tolerance) : sel===q.correct){
+        correct++; marks+=test.marksCorrect; perSubject[subj].correct++; perSubject[subj].marks+=test.marksCorrect; status='correct';
+      } else {
+        wrong++; marks-=test.marksWrong; perSubject[subj].wrong++; perSubject[subj].marks-=test.marksWrong; status='wrong';
+      }
+      perQuestion.push({i:idx, text:q.text, subject:q.subject, type:q.type||'mcq', options:q.options, correct:q.correct, sel:(sel===undefined?null:sel), status, image:q.image||null});
+    });
+    const totalPossible = (test.questions||[]).length * (test.marksCorrect||0);
+    return {correct, wrong, unattempted, marks, totalPossible, perSubject, perQuestion};
+  }
+
+  /* ============ API (talks directly to Supabase — see security note above) ============ */
+  async function doAction(action, payload){
+    switch(action){
+      case 'ping': {
+        const { error } = await sbClient.from('tests').select('id').limit(1);
+        if(error) throw new Error(error.message);
+        return { ok:true };
+      }
+      case 'checkTeacherPin': {
+        if(String(payload.pin) !== String(TEACHER_PIN)) throw new Error('Incorrect PIN.');
+        return { ok:true };
+      }
+      case 'listTestsForTeacher': {
+        const { data, error } = await sbClient.from('tests').select('id,title,data,active,created_at').order('created_at',{ascending:false});
+        if(error) throw new Error(error.message);
+        const tests = (data||[]).map(row => ({ ...(row.data||{}), id: row.id, title: row.title, active: row.active, createdAt: row.created_at }));
+        return { tests };
+      }
+      case 'saveTest': {
+        const test = payload;
+        const row = { id: test.id, title: test.title, data: test, active: test.active !== false, created_at: test.createdAt || Date.now() };
+        const { error } = await sbClient.from('tests').upsert(row);
+        if(error) throw new Error(error.message);
+        return { ok:true, id: test.id };
+      }
+      case 'deleteTest': {
+        const { error } = await sbClient.from('tests').delete().eq('id', payload.id);
+        if(error) throw new Error(error.message);
+        return { ok:true };
+      }
+      case 'getTestForStudent': {
+        const { data, error } = await sbClient.from('tests').select('data,active').eq('id', payload.id).maybeSingle();
+        if(error) throw new Error(error.message);
+        if(!data) throw new Error('No test found with that code. Check it and try again.');
+        if(data.active === false) throw new Error('This test is currently inactive. Please check with your teacher for the current test code.');
+        return { test: data.data };
+      }
+      case 'submitAttempt': {
+        const { data: testRow, error: testErr } = await sbClient.from('tests').select('title').eq('id', payload.testId).maybeSingle();
+        if(testErr) throw new Error(testErr.message);
+        if(!testRow) throw new Error('Test not found');
+        const { error } = await sbClient.from('submissions').insert({
+          test_id: payload.testId, student_name: payload.studentName || 'Unnamed', roll_no: payload.rollNo || '',
+          answers: payload.answers, violations: payload.violations || 0, time_taken_sec: payload.timeTakenSec || 0, created_at: Date.now()
+        });
+        if(error) throw new Error(error.message);
+        await sbClient.from('progress').delete().eq('key', progressKey(payload.testId, payload.studentName, payload.rollNo));
+        return { result: { hidden: true, testTitle: testRow.title } };
+      }
+      case 'generateResults': {
+        const { data: testRow, error: testErr } = await sbClient.from('tests').select('data').eq('id', payload.testId).maybeSingle();
+        if(testErr) throw new Error(testErr.message);
+        if(!testRow) throw new Error('Test not found');
+        const test = testRow.data;
+        const { data: subs, error: subErr } = await sbClient.from('submissions').select('*').eq('test_id', payload.testId);
+        if(subErr) throw new Error(subErr.message);
+        for(const sub of (subs||[])){
+          const scored = scoreSubmission(test, sub.answers || []);
+          const { error: upErr } = await sbClient.from('results').upsert({
+            id: sub.id, test_id: payload.testId, student_name: sub.student_name, roll_no: sub.roll_no,
+            score: scored.marks, total: scored.totalPossible, correct: scored.correct, wrong: scored.wrong, unattempted: scored.unattempted,
+            violations: sub.violations, time_taken_sec: sub.time_taken_sec,
+            detail: { perSubject: scored.perSubject, perQuestion: scored.perQuestion }, created_at: sub.created_at
+          });
+          if(upErr) throw new Error(upErr.message);
+        }
+        return { ok:true, updated: (subs||[]).length };
+      }
+      case 'getResults': {
+        const { data, error } = await sbClient.from('results').select('*').eq('test_id', payload.testId).order('created_at',{ascending:false});
+        if(error) throw new Error(error.message);
+        const results = (data||[]).map(r=>({
+          id:r.id, studentName:r.student_name, rollNo:r.roll_no,
+          score:r.score, total:r.total, correct:r.correct, wrong:r.wrong, unattempted:r.unattempted,
+          violations:r.violations, timeTakenSec:r.time_taken_sec, date:r.created_at,
+          scored: r.score!==null && r.score!==undefined,
+          perQuestion: (r.detail && r.detail.perQuestion) || []
+        }));
+        return { results };
+      }
+      case 'saveProgress': {
+        const key = progressKey(payload.testId, payload.studentName, payload.rollNo);
+        const { error } = await sbClient.from('progress').upsert({
+          key, test_id: payload.testId, student_name: payload.studentName, roll_no: payload.rollNo || '',
+          answers: payload.answers, status: payload.status, violations: payload.violations || 0,
+          started_at: payload.startedAt, updated_at: Date.now()
+        });
+        if(error) throw new Error(error.message);
+        return { ok:true };
+      }
+      case 'getProgress': {
+        const key = progressKey(payload.testId, payload.studentName, payload.rollNo);
+        const { data, error } = await sbClient.from('progress').select('*').eq('key', key).maybeSingle();
+        if(error) throw new Error(error.message);
+        if(!data) return { progress: null };
+        return { progress: { answers: data.answers, status: data.status, violations: data.violations, startedAt: data.started_at } };
+      }
+      case 'uploadImage': {
+        const bytes = Uint8Array.from(atob(payload.data), c=>c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: payload.mimeType || 'image/png' });
+        const ext = (payload.filename || 'image').split('.').pop() || 'png';
+        const path = `q-${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+        const { error } = await sbClient.storage.from('question-images').upload(path, blob, { contentType: payload.mimeType || 'image/png', upsert:false });
+        if(error) throw new Error(error.message);
+        const { data: pub } = sbClient.storage.from('question-images').getPublicUrl(path);
+        return { url: pub.publicUrl };
+      }
+      default:
+        throw new Error('Unknown action: ' + action);
+    }
+  }
+
   async function apiCall(action, payload, timeoutMs){
-    if(!API_URL || API_URL.indexOf('PASTE_YOUR') === 0){
-      throw new Error('The teacher/student portal isn\'t connected to a database yet — paste your Google Apps Script URL into API_URL at the top of app.js.');
+    if(!sbClient){
+      throw new Error('The portal isn\'t connected to Supabase yet — paste your Project URL and anon key into SUPABASE_URL / SUPABASE_ANON_KEY at the top of app.js.');
     }
-    const controller = new AbortController();
-    const effectiveTimeout = timeoutMs || 12000;
-    const timeoutId = setTimeout(()=>controller.abort(), effectiveTimeout);
-    let res;
+    payload = payload || {};
+    const effectiveTimeout = timeoutMs || 15000;
+    let timeoutHandle;
+    const timeoutPromise = new Promise((_,reject)=>{
+      timeoutHandle = setTimeout(()=>reject(new Error(`Request timed out after ${Math.round(effectiveTimeout/1000)}s. Check your internet connection and that the Supabase project isn't paused (Supabase dashboard > your project).`)), effectiveTimeout);
+    });
     try{
-      res = await fetch(API_URL, { method:'POST', body: JSON.stringify({ action, payload }), signal: controller.signal });
+      const result = await Promise.race([doAction(action, payload), timeoutPromise]);
+      clearTimeout(timeoutHandle);
+      return result;
     }catch(err){
-      if(err.name==='AbortError') throw new Error(`The request to Google timed out after ${Math.round(effectiveTimeout/1000)}s. Check that your Apps Script is deployed with "Who has access: Anyone", and that you redeployed after any code changes (Deploy → Manage deployments → Edit → New version).`);
-      throw new Error('Network request failed: ' + err.message + '. Check the API_URL at the top of app.js is correct and the deployment is live.');
-    }finally{
-      clearTimeout(timeoutId);
+      clearTimeout(timeoutHandle);
+      throw new Error(err.message || String(err));
     }
-    let data;
-    try{
-      data = await res.json();
-    }catch(err){
-      throw new Error('Got a response that wasn\'t valid JSON (status ' + res.status + '). This usually means the Apps Script isn\'t authorized yet, or access isn\'t set to "Anyone" — open the deployed URL directly in a browser tab to see the raw error.');
-    }
-    if(data.error) throw new Error(data.error);
-    return data;
   }
 
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
@@ -730,7 +890,7 @@
     if(csvInput) csvInput.onchange = onCsvFileChosen;
   }
 
-  // Uploads a question image to Google Drive (via Apps Script) and stores the
+  // Uploads a question image to Supabase Storage and stores the
   // resulting link — used by both drag-and-drop and the "Browse file" fallback.
   async function handleImageFile(i, file){
     if(!file.type.startsWith('image/')){ showModal('Not an image', 'Please choose an image file (JPG, PNG, etc).', true); return; }
@@ -1069,12 +1229,27 @@
     else progressSaveTimer = setTimeout(doSave, 2000);
   }
   window.addEventListener('beforeunload', function(){
-    if(view==='player' && attempt && !attempt.submitting && API_URL.indexOf('PASTE_YOUR')!==0){
-      const body = JSON.stringify({ action:'saveProgress', payload:{
-        testId: attempt.test.id, studentName: studentInfo.name, rollNo: studentInfo.rollNo,
-        answers: attempt.selected, status: attempt.status, violations: attempt.violations, startedAt: attempt.startedAt
-      }});
-      navigator.sendBeacon(API_URL, new Blob([body], {type:'text/plain'}));
+    // sendBeacon can't send the auth headers Supabase requires, so we use
+    // fetch with keepalive instead — it still completes even after the page
+    // starts unloading, and (unlike sendBeacon) supports custom headers.
+    if(view==='player' && attempt && !attempt.submitting && sbClient){
+      try{
+        fetch(`${SUPABASE_URL}/rest/v1/progress?on_conflict=key`, {
+          method: 'POST', keepalive: true,
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+            'Prefer': 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify([{
+            key: progressKey(attempt.test.id, studentInfo.name, studentInfo.rollNo),
+            test_id: attempt.test.id, student_name: studentInfo.name, roll_no: studentInfo.rollNo || '',
+            answers: attempt.selected, status: attempt.status, violations: attempt.violations,
+            started_at: attempt.startedAt, updated_at: Date.now()
+          }])
+        });
+      }catch(e){ /* best-effort only */ }
     }
   });
 
@@ -1441,33 +1616,18 @@
     const original = btn ? btn.textContent : null;
     if(btn){ btn.textContent = 'Testing…'; btn.disabled = true; }
     const lines = [];
-    // Test 1: GET (doGet)
     try{
-      const controller = new AbortController();
-      const timeoutId = setTimeout(()=>controller.abort(), 10000);
-      const res = await fetch(API_URL, { method:'GET', signal: controller.signal });
-      clearTimeout(timeoutId);
-      const text = await res.text();
-      lines.push(`<strong>GET (doGet):</strong> HTTP ${res.status} — ${res.ok ? '✅ reachable' : '⚠ unexpected status'}`);
-      lines.push(`<div class="mono" style="font-size:12px; white-space:pre-wrap; margin:4px 0 12px;">${escapeHtml(text.slice(0,300))}</div>`);
+      const data = await apiCall('ping', {}, 10000);
+      lines.push(`<strong>Supabase connection:</strong> ✅ reachable`);
+      lines.push(`<div class="mono" style="font-size:12px; white-space:pre-wrap; margin:4px 0 12px;">${escapeHtml(JSON.stringify(data))}</div>`);
     }catch(e){
-      const reason = e.name==='AbortError' ? 'Timed out after 10s — Google never responded.' : e.message;
-      lines.push(`<strong>GET (doGet):</strong> ❌ Failed — ${escapeHtml(reason)}`);
+      lines.push(`<strong>Supabase connection:</strong> ❌ Failed — ${escapeHtml(e.message)}`);
     }
-    // Test 2: POST (doPost, the pathway saveTest/getResults etc. actually use)
     try{
-      const controller = new AbortController();
-      const timeoutId = setTimeout(()=>controller.abort(), 10000);
-      const res = await fetch(API_URL, { method:'POST', body: JSON.stringify({action:'listTestsForTeacher', payload:{}}), signal: controller.signal });
-      clearTimeout(timeoutId);
-      const text = await res.text();
-      let ok = false, preview = text;
-      try{ const j = JSON.parse(text); ok = !j.error; preview = JSON.stringify(j).slice(0,200); }catch(e){}
-      lines.push(`<strong>POST (doPost):</strong> HTTP ${res.status} — ${ok ? '✅ working correctly' : '⚠ responded, but with an error/unexpected body'}`);
-      lines.push(`<div class="mono" style="font-size:12px; white-space:pre-wrap; margin:4px 0;">${escapeHtml(preview)}</div>`);
+      const data = await apiCall('listTestsForTeacher', {}, 10000);
+      lines.push(`<strong>Database read:</strong> ✅ working — found ${(data.tests||[]).length} test(s)`);
     }catch(e){
-      const reason = e.name==='AbortError' ? 'Timed out after 10s — Google never responded.' : e.message;
-      lines.push(`<strong>POST (doPost):</strong> ❌ Failed — ${escapeHtml(reason)}`);
+      lines.push(`<strong>Database read:</strong> ❌ Failed — ${escapeHtml(e.message)}`);
     }
     showModal('Connection test', lines.join(''));
     if(btn){ btn.textContent = original; btn.disabled = false; }
