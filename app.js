@@ -5,26 +5,23 @@
      PASTE YOUR SUPABASE PROJECT URL AND ANON KEY BELOW.
      Find both in: Supabase Dashboard > Project Settings > API.
 
-     IMPORTANT — read this once: this app talks to Supabase DIRECTLY from
-     the browser (no server-side function in between). That means:
-       - The full test, including correct answers, is present in the
-         browser's memory/network response once a student opens a test —
-         a technical student COULD find answers via DevTools' Network tab.
-       - TEACHER_PIN below is a plain value in this file — visible to
-         anyone who views the page source, same exposure as the student
-         link key. It stops casual guessing, not a determined look at the
-         code.
-     This was a deliberate simplicity-over-security tradeoff (the
-     alternative — Supabase Edge Functions — keeps both hidden server-side,
-     like the old Apps Script backend did, at the cost of more setup).
+     HARDENED MODE — this file talks to Supabase only through PIN-checked
+     database functions (see schema_hardened.sql), not raw tables:
+       - Correct answers are stripped server-side before a student's test
+         loads — same guarantee the old Apps Script backend gave.
+       - The teacher PIN lives only in the database — it is NOT in this
+         file, and is never sent to any browser. Change/view it by running
+         one line of SQL in Supabase's SQL Editor (see schema_hardened.sql).
+       - Scoring happens inside the database itself — the browser can ask
+         "please (re)score this test" but can never hand over a score.
+     Run schema_hardened.sql in Supabase's SQL Editor before using this file.
   ==================================================================== */
-  const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.co";
+  const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.com";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvbG93Z2RsYWRqeXZla3Z5eWptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyOTc3NjYsImV4cCI6MjEwNDg3Mzc2Nn0.9RU7TP5jRK0Bb2q2PdNCdQodS_sBs1zReb08cHHlXsk";
-  const TEACHER_PIN = "14091996"; // e.g. "2580" — change any time, no redeploy needed beyond re-uploading this file
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v21';
+  const APP_VERSION = 'v22';
 
   const MAX_VIOLATIONS = 3;
 
@@ -55,140 +52,88 @@
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
 
-  function progressKey(testId, studentName, rollNo){
-    return testId + '||' + studentName + '||' + (rollNo||'');
-  }
-
   // Scoring logic — runs in the teacher's browser when they click "Generate
-  // results" (or re-click after fixing a correct answer). Same rules as
-  // before: MCQ exact match, or numerical within an optional ± tolerance.
-  function isNumericMatch(studentVal, correctVal, tolerance){
-    const s = parseFloat(String(studentVal).trim()), c = parseFloat(String(correctVal).trim());
-    if(isNaN(s) || isNaN(c)) return false;
-    let tol = parseFloat(tolerance); if(isNaN(tol) || tol<0) tol = 0;
-    return Math.abs(s-c) <= tol+1e-9;
-  }
-  function scoreSubmission(test, answers){
-    let correct=0, wrong=0, unattempted=0, marks=0;
-    const perSubject={}, perQuestion=[];
-    (test.questions||[]).forEach((q,idx)=>{
-      const subj = q.subject || 'General';
-      if(!perSubject[subj]) perSubject[subj] = {total:0,correct:0,wrong:0,unattempted:0,marks:0};
-      perSubject[subj].total++;
-      const sel = answers[idx];
-      const isNum = q.type==='numerical';
-      let status;
-      if(sel===null || sel===undefined || String(sel).trim()===''){
-        unattempted++; perSubject[subj].unattempted++; status='skip';
-      } else if(isNum ? isNumericMatch(sel,q.correct,q.tolerance) : sel===q.correct){
-        correct++; marks+=test.marksCorrect; perSubject[subj].correct++; perSubject[subj].marks+=test.marksCorrect; status='correct';
-      } else {
-        wrong++; marks-=test.marksWrong; perSubject[subj].wrong++; perSubject[subj].marks-=test.marksWrong; status='wrong';
-      }
-      perQuestion.push({i:idx, text:q.text, subject:q.subject, type:q.type||'mcq', options:q.options, correct:q.correct, sel:(sel===undefined?null:sel), status, image:q.image||null});
-    });
-    const totalPossible = (test.questions||[]).length * (test.marksCorrect||0);
-    return {correct, wrong, unattempted, marks, totalPossible, perSubject, perQuestion};
+  // Client-side scoring is no longer used — generate_results() computes
+  // scores inside Postgres itself (see schema_hardened.sql). Kept here only
+  // as dead code removed; scoring logic now lives entirely server-side.
+
+  function getTeacherPin(){
+    const pin = sessionStorage.getItem('teacherPin');
+    if(!pin) throw new Error('Your teacher session expired — please re-enter the PIN.');
+    return pin;
   }
 
-  /* ============ API (talks directly to Supabase — see security note above) ============ */
+  /* ============ API — every call here maps to a PIN-checked Postgres
+     function (see schema_hardened.sql), never a raw table. ============ */
   async function doAction(action, payload){
     switch(action){
       case 'ping': {
-        const { error } = await sbClient.from('tests').select('id').limit(1);
+        const { data, error } = await sbClient.rpc('ping');
         if(error) throw new Error(error.message);
-        return { ok:true };
+        return data;
       }
       case 'checkTeacherPin': {
-        if(String(payload.pin) !== String(TEACHER_PIN)) throw new Error('Incorrect PIN.');
+        const { data, error } = await sbClient.rpc('check_teacher_pin', { input_pin: payload.pin });
+        if(error) throw new Error(error.message);
+        if(!data) throw new Error('Incorrect PIN.');
         return { ok:true };
       }
       case 'listTestsForTeacher': {
-        const { data, error } = await sbClient.from('tests').select('id,title,data,active,created_at').order('created_at',{ascending:false});
+        const { data, error } = await sbClient.rpc('get_tests_for_teacher', { input_pin: getTeacherPin() });
         if(error) throw new Error(error.message);
-        const tests = (data||[]).map(row => ({ ...(row.data||{}), id: row.id, title: row.title, active: row.active, createdAt: row.created_at }));
-        return { tests };
+        return { tests: data || [] };
       }
       case 'saveTest': {
-        const test = payload;
-        const row = { id: test.id, title: test.title, data: test, active: test.active !== false, created_at: test.createdAt || Date.now() };
-        const { error } = await sbClient.from('tests').upsert(row);
+        const { error } = await sbClient.rpc('save_test', { input_pin: getTeacherPin(), test_json: payload });
         if(error) throw new Error(error.message);
-        return { ok:true, id: test.id };
+        return { ok:true, id: payload.id };
       }
       case 'deleteTest': {
-        const { error } = await sbClient.from('tests').delete().eq('id', payload.id);
+        const { error } = await sbClient.rpc('delete_test', { input_pin: getTeacherPin(), test_id_input: payload.id });
         if(error) throw new Error(error.message);
         return { ok:true };
       }
       case 'getTestForStudent': {
-        const { data, error } = await sbClient.from('tests').select('data,active').eq('id', payload.id).maybeSingle();
+        const { data, error } = await sbClient.rpc('get_test_for_student', { test_id_input: payload.id });
         if(error) throw new Error(error.message);
-        if(!data) throw new Error('No test found with that code. Check it and try again.');
-        if(data.active === false) throw new Error('This test is currently inactive. Please check with your teacher for the current test code.');
-        return { test: data.data };
+        return { test: data };
       }
       case 'submitAttempt': {
-        const { data: testRow, error: testErr } = await sbClient.from('tests').select('title').eq('id', payload.testId).maybeSingle();
-        if(testErr) throw new Error(testErr.message);
-        if(!testRow) throw new Error('Test not found');
-        const { error } = await sbClient.from('submissions').insert({
-          test_id: payload.testId, student_name: payload.studentName || 'Unnamed', roll_no: payload.rollNo || '',
-          answers: payload.answers, violations: payload.violations || 0, time_taken_sec: payload.timeTakenSec || 0, created_at: Date.now()
+        const { data, error } = await sbClient.rpc('submit_attempt', {
+          test_id_input: payload.testId, student_name_input: payload.studentName || 'Unnamed', roll_no_input: payload.rollNo || '',
+          answers_input: payload.answers, violations_input: payload.violations || 0, time_taken_sec_input: payload.timeTakenSec || 0
         });
         if(error) throw new Error(error.message);
-        await sbClient.from('progress').delete().eq('key', progressKey(payload.testId, payload.studentName, payload.rollNo));
-        return { result: { hidden: true, testTitle: testRow.title } };
+        return { result: data };
       }
       case 'generateResults': {
-        const { data: testRow, error: testErr } = await sbClient.from('tests').select('data').eq('id', payload.testId).maybeSingle();
-        if(testErr) throw new Error(testErr.message);
-        if(!testRow) throw new Error('Test not found');
-        const test = testRow.data;
-        const { data: subs, error: subErr } = await sbClient.from('submissions').select('*').eq('test_id', payload.testId);
-        if(subErr) throw new Error(subErr.message);
-        for(const sub of (subs||[])){
-          const scored = scoreSubmission(test, sub.answers || []);
-          const { error: upErr } = await sbClient.from('results').upsert({
-            id: sub.id, test_id: payload.testId, student_name: sub.student_name, roll_no: sub.roll_no,
-            score: scored.marks, total: scored.totalPossible, correct: scored.correct, wrong: scored.wrong, unattempted: scored.unattempted,
-            violations: sub.violations, time_taken_sec: sub.time_taken_sec,
-            detail: { perSubject: scored.perSubject, perQuestion: scored.perQuestion }, created_at: sub.created_at
-          });
-          if(upErr) throw new Error(upErr.message);
-        }
-        return { ok:true, updated: (subs||[]).length };
+        const { data, error } = await sbClient.rpc('generate_results', { input_pin: getTeacherPin(), test_id_input: payload.testId });
+        if(error) throw new Error(error.message);
+        return { ok:true, updated: data };
       }
       case 'getResults': {
-        const { data, error } = await sbClient.from('results').select('*').eq('test_id', payload.testId).order('created_at',{ascending:false});
+        const { data, error } = await sbClient.rpc('get_results', { input_pin: getTeacherPin(), test_id_input: payload.testId });
         if(error) throw new Error(error.message);
-        const results = (data||[]).map(r=>({
-          id:r.id, studentName:r.student_name, rollNo:r.roll_no,
-          score:r.score, total:r.total, correct:r.correct, wrong:r.wrong, unattempted:r.unattempted,
-          violations:r.violations, timeTakenSec:r.time_taken_sec, date:r.created_at,
-          scored: r.score!==null && r.score!==undefined,
-          perQuestion: (r.detail && r.detail.perQuestion) || []
-        }));
-        return { results };
+        return { results: data || [] };
       }
       case 'saveProgress': {
-        const key = progressKey(payload.testId, payload.studentName, payload.rollNo);
-        const { error } = await sbClient.from('progress').upsert({
-          key, test_id: payload.testId, student_name: payload.studentName, roll_no: payload.rollNo || '',
-          answers: payload.answers, status: payload.status, violations: payload.violations || 0,
-          started_at: payload.startedAt, updated_at: Date.now()
+        const { error } = await sbClient.rpc('save_progress', {
+          test_id_input: payload.testId, student_name_input: payload.studentName, roll_no_input: payload.rollNo || '',
+          answers_input: payload.answers, status_input: payload.status, violations_input: payload.violations || 0, started_at_input: payload.startedAt
         });
         if(error) throw new Error(error.message);
         return { ok:true };
       }
       case 'getProgress': {
-        const key = progressKey(payload.testId, payload.studentName, payload.rollNo);
-        const { data, error } = await sbClient.from('progress').select('*').eq('key', key).maybeSingle();
+        const { data, error } = await sbClient.rpc('get_progress', {
+          test_id_input: payload.testId, student_name_input: payload.studentName, roll_no_input: payload.rollNo || ''
+        });
         if(error) throw new Error(error.message);
-        if(!data) return { progress: null };
-        return { progress: { answers: data.answers, status: data.status, violations: data.violations, startedAt: data.started_at } };
+        return { progress: data };
       }
       case 'uploadImage': {
+        // Unchanged — direct Storage access, governed by bucket policies
+        // (public read, anon insert only) rather than by these functions.
         const bytes = Uint8Array.from(atob(payload.data), c=>c.charCodeAt(0));
         const blob = new Blob([bytes], { type: payload.mimeType || 'image/png' });
         const ext = (payload.filename || 'image').split('.').pop() || 'png';
@@ -309,7 +254,7 @@
     `;
   }
   window.app_goTeacher = async function(){
-    if(sessionStorage.getItem('teacherUnlocked')==='1'){
+    if(sessionStorage.getItem('teacherPin')){
       await enterTeacherHome();
       return;
     }
@@ -336,7 +281,7 @@
     setLoading('Checking…');
     try{
       await apiCall('checkTeacherPin', {pin});
-      sessionStorage.setItem('teacherUnlocked','1');
+      sessionStorage.setItem('teacherPin', pin); // stored so every subsequent teacher action can re-prove it — the server re-checks it every time, this is just what gets sent
       await enterTeacherHome();
     }catch(e){
       teacherPinError = e.message;
@@ -350,7 +295,15 @@
       const data = await apiCall('listTestsForTeacher', {});
       teacherTests = data.tests || [];
       teacherTests.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-    }catch(e){ showError(e); teacherTests=[]; }
+    }catch(e){
+      if(String(e.message).toLowerCase().includes('pin')){
+        sessionStorage.removeItem('teacherPin');
+        teacherPinError = 'Your session expired — please re-enter the PIN.';
+        view='teacher-pin'; render();
+        return;
+      }
+      showError(e); teacherTests=[];
+    }
     render();
   }
   window.app_goStudentEntry = function(){ role='student'; view='student-entry'; render(); };
@@ -1232,22 +1185,22 @@
     // sendBeacon can't send the auth headers Supabase requires, so we use
     // fetch with keepalive instead — it still completes even after the page
     // starts unloading, and (unlike sendBeacon) supports custom headers.
+    // Hits the save_progress RPC (not the table directly — direct table
+    // access is revoked, see schema_hardened.sql).
     if(view==='player' && attempt && !attempt.submitting && sbClient){
       try{
-        fetch(`${SUPABASE_URL}/rest/v1/progress?on_conflict=key`, {
+        fetch(`${SUPABASE_URL}/rest/v1/rpc/save_progress`, {
           method: 'POST', keepalive: true,
           headers: {
             'Content-Type': 'application/json',
             'apikey': SUPABASE_ANON_KEY,
-            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-            'Prefer': 'resolution=merge-duplicates'
+            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
           },
-          body: JSON.stringify([{
-            key: progressKey(attempt.test.id, studentInfo.name, studentInfo.rollNo),
-            test_id: attempt.test.id, student_name: studentInfo.name, roll_no: studentInfo.rollNo || '',
-            answers: attempt.selected, status: attempt.status, violations: attempt.violations,
-            started_at: attempt.startedAt, updated_at: Date.now()
-          }])
+          body: JSON.stringify({
+            test_id_input: attempt.test.id, student_name_input: studentInfo.name, roll_no_input: studentInfo.rollNo || '',
+            answers_input: attempt.selected, status_input: attempt.status, violations_input: attempt.violations,
+            started_at_input: attempt.startedAt
+          })
         });
       }catch(e){ /* best-effort only */ }
     }
