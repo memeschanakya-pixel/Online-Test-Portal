@@ -16,8 +16,8 @@
          "please (re)score this test" but can never hand over a score.
      Run schema_hardened.sql in Supabase's SQL Editor before using this file.
   ==================================================================== */
-  const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.co";
-  const SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_PUBLIC_KEY_HERE";
+  const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.com";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvbG93Z2RsYWRqeXZla3Z5eWptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyOTc3NjYsImV4cCI6MjEwNDg3Mzc2Nn0.9RU7TP5jRK0Bb2q2PdNCdQodS_sBs1zReb08cHHlXsk";
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
