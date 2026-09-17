@@ -17,11 +17,11 @@
      Run schema_hardened.sql in Supabase's SQL Editor before using this file.
   ==================================================================== */
   const SUPABASE_URL = "https://colowgdladjyvekvyyjm.supabase.co";
-  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvbG93Z2RsYWRqeXZla3Z5eWptIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyOTc3NjYsImV4cCI6MjEwNDg3Mzc2Nn0.9RU7TP5jRK0Bb2q2PdNCdQodS_sBs1zReb08cHHlXsk";
+  const SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_PUBLIC_KEY_HERE";
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v22';
+  const APP_VERSION = 'v23';
 
   const MAX_VIOLATIONS = 3;
 
@@ -508,14 +508,14 @@
       <h2 class="section-title">${escapeHtml(teacherResultsTestTitle)}</h2>
       ${loadError ? `<div class="empty-state" style="border-color:var(--red); color:var(--red); text-align:left;"><h3 style="color:var(--red);">Couldn't load results</h3><div>${escapeHtml(loadError)}</div><div style="margin-top:14px;"><button class="btn secondary small" onclick="app_viewResults('${testId}','${encodeURIComponent(teacherResultsTestTitle)}')">Try again</button></div></div>` : `
       <div class="helper" style="margin-bottom:16px;">"Flags" mean the student exited fullscreen or switched tabs during the attempt.</div>
-      ${teacherResultsCache.length===0 ? `<div class="empty-state"><h3>No attempts yet</h3><div>Results will appear here once students submit the test.</div></div>` : `
       <div class="panel" style="margin-bottom:16px; padding:14px 18px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
         <div>
           <div style="font-weight:600; margin-bottom:2px;">${scoredCount} of ${teacherResultsCache.length} attempts scored</div>
-          <div class="helper">Make sure correct answers are set on the test, then generate — safe to click again after any fix, it re-scores everyone.</div>
+          <div class="helper">Students who've submitted won't show below until you click this — safe to click again any time (e.g. after fixing a correct answer), it re-scores everyone.</div>
         </div>
         <button class="btn" id="generate-results-btn" onclick="app_generateResults()">Generate results</button>
       </div>
+      ${teacherResultsCache.length===0 ? `<div class="empty-state"><h3>No scored attempts yet</h3><div>If students have already submitted, click "Generate results" above — submissions only appear here after that.</div></div>` : `
       <div style="display:flex; gap:10px; margin-bottom:14px; align-items:center; flex-wrap:wrap;">
         <input type="text" id="results-search" placeholder="Search by name or roll no." value="${escapeHtml(resultsSearchQuery)}" style="flex:1; min-width:220px; padding:9px 10px; border:1px solid var(--line); border-radius:var(--radius);">
         <span class="helper">${selectedStudentIds.size>0 ? selectedStudentIds.size+' student'+(selectedStudentIds.size>1?'s':'')+' selected — exports use only these' : 'No selection — exports include everyone'}</span>
