@@ -21,7 +21,7 @@
 
   // Bump this any time you deploy a new app.js — shown in the footer, so you
   // can always confirm at a glance whether your latest upload is actually live.
-  const APP_VERSION = 'v23';
+  const APP_VERSION = 'v24';
 
   const MAX_VIOLATIONS = 3;
 
@@ -51,6 +51,30 @@
   const sbClient = (typeof window.supabase !== 'undefined' && SUPABASE_ANON_KEY.indexOf('PASTE_YOUR')!==0)
     ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
     : null;
+
+  /* ============ NATIVE APP BRIDGE ============
+     window.NativeBridge exists only inside the Android ExamLockApp. In a normal
+     browser everything below is a harmless no-op. */
+  const NB = window.NativeBridge || null;
+  const IN_NATIVE = !!NB;
+  function nbSafe(fn, fallback){ try{ return fn(); }catch(e){ return fallback; } }
+  function nbLog(type, detail, durMs){
+    if(NB) nbSafe(()=> NB.logEvent(type, JSON.stringify(detail||{}), String(Math.round(durMs||0))));
+  }
+  let nativeResumeInfo = null;   // set when the app restarted mid-test and we auto-resume
+
+  // Violations the native side recorded (left app, restart, unpinned…). Pulled, not
+  // pushed, so nothing is lost if the page was frozen or reloaded when they happened.
+  function drainNativeViolations(){
+    if(!NB || view!=='player' || !attempt || attempt.submitting) return;
+    let list = [];
+    try{ list = JSON.parse(NB.drainViolations() || '[]'); }catch(e){}
+    for(const v of list){
+      if(!attempt || attempt.submitting) break;
+      registerViolation(v.msg || 'You left the test.');
+    }
+  }
+  window.nativeWake = drainNativeViolations;
 
   // Scoring logic — runs in the teacher's browser when they click "Generate
   // Client-side scoring is no longer used — generate_results() computes
@@ -130,6 +154,14 @@
         });
         if(error) throw new Error(error.message);
         return { progress: data };
+      }
+      case 'getExamEvents': {
+        const { data, error } = await sbClient.rpc('get_exam_events', {
+          input_pin: getTeacherPin(), test_id_input: payload.testId,
+          student_name_input: payload.studentName, roll_no_input: payload.rollNo || ''
+        });
+        if(error) throw new Error(error.message);
+        return { events: data || [] };
       }
       case 'uploadImage': {
         // Unchanged — direct Storage access, governed by bucket policies
@@ -500,14 +532,14 @@
         <td>${fmtTime(r.timeTakenSec)}</td>
         <td>${r.violations>0 ? `<span class="status-pill wrong">${r.violations} flag${r.violations>1?'s':''}</span>` : '—'}</td>
         <td>${new Date(r.date).toLocaleString()}</td>
-        <td>${r.perQuestion && r.perQuestion.length ? `<button class="btn secondary small" onclick="app_viewStudentAnswers('${r.id}')">View answers</button>` : '—'}</td>
+        <td>${r.perQuestion && r.perQuestion.length ? `<button class="btn secondary small" onclick="app_viewStudentAnswers('${r.id}')">View answers</button>` : ''} <button class="btn secondary small" onclick="app_viewTimeline('${r.id}')">Timeline</button></td>
       </tr>
     `).join('');
     app.innerHTML = `
       ${topbar('Results', 'app_goTeacher()')}
       <h2 class="section-title">${escapeHtml(teacherResultsTestTitle)}</h2>
       ${loadError ? `<div class="empty-state" style="border-color:var(--red); color:var(--red); text-align:left;"><h3 style="color:var(--red);">Couldn't load results</h3><div>${escapeHtml(loadError)}</div><div style="margin-top:14px;"><button class="btn secondary small" onclick="app_viewResults('${testId}','${encodeURIComponent(teacherResultsTestTitle)}')">Try again</button></div></div>` : `
-      <div class="helper" style="margin-bottom:16px;">"Flags" mean the student exited fullscreen or switched tabs during the attempt.</div>
+      <div class="helper" style="margin-bottom:16px;">"Flags" mean the student left the test (fullscreen exit, tab/app switch, app restart, screen unpinned). Use "Timeline" on a row to see exactly what happened and when.</div>
       <div class="panel" style="margin-bottom:16px; padding:14px 18px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
         <div>
           <div style="font-weight:600; margin-bottom:2px;">${scoredCount} of ${teacherResultsCache.length} attempts scored</div>
@@ -561,6 +593,43 @@
     const allSelected = visible.length>0 && visible.every(r=>selectedStudentIds.has(r.id));
     visible.forEach(r=> allSelected ? selectedStudentIds.delete(r.id) : selectedStudentIds.add(r.id));
     renderTeacherResultsInner(currentResultsTestId, null);
+  };
+
+  const TIMELINE_LABELS = {
+    away:'Left the test screen', app_restart:'App was restarted', unpinned:'Screen pinning turned off',
+    heartbeat_gap:'No signal from the phone', js_frozen:'Test page was frozen',
+    webview_crashed:'Test page crashed (low memory?)', blocked_navigation:'Tried to open another site',
+    config_changed:'Display/window settings changed', multi_window:'Split-screen / floating window',
+    activity_recreated:'App screen was re-created'
+  };
+  function describeEvent(e){
+    const d = e.detail || {};
+    const sec = e.duration_ms ? ` (${Math.round(e.duration_ms/1000)}s)` : '';
+    let label = TIMELINE_LABELS[e.event_type] || e.event_type;
+    if(e.event_type==='heartbeat_gap') label += `${sec} — network drop, call, or app killed`;
+    else if(e.event_type==='multi_window') label += d.active ? ' — ON' : ' — off';
+    else if(e.event_type==='config_changed') label += ` — ${d.w_dp||'?'}×${d.h_dp||'?'} dp`;
+    else if(e.event_type==='away') label += `${sec}`;
+    else if(e.event_type==='app_restart') label += ` — gap ${Math.round((d.gap_ms||0)/1000)}s`;
+    else label += sec;
+    return label;
+  }
+  window.app_viewTimeline = async function(id){
+    const r = teacherResultsCache.find(x=>String(x.id)===String(id));
+    if(!r) return;
+    showModal('Timeline — ' + (r.studentName||''), '<div class="helper">Loading…</div>');
+    try{
+      const data = await apiCall('getExamEvents', {testId: currentResultsTestId, studentName: r.studentName, rollNo: r.rollNo||''});
+      const evs = data.events || [];
+      const body = evs.length===0
+        ? '<div class="helper">No app events recorded for this student. (Either nothing happened, or they used the browser instead of the exam app, or an old app version.)</div>'
+        : `<div style="max-height:60vh; overflow:auto;"><table class="subj-table"><tbody>${
+            evs.map(e=>`<tr style="${e.counted_violation?'background:var(--red-soft,#fdecea);':''}">
+              <td class="mono" style="white-space:nowrap;">${new Date(e.ts).toLocaleTimeString()}</td>
+              <td>${e.counted_violation?'⚠ ':''}${escapeHtml(describeEvent(e))}</td></tr>`).join('')
+          }</tbody></table></div><div class="helper" style="margin-top:8px;">⚠ = counted as a warning. A "no signal" gap can also be a legit network drop or phone call — it is flagged, not auto-penalised.</div>`;
+      showModal('Timeline — ' + (r.studentName||''), body);
+    }catch(e){ showError(e); }
   };
 
   window.app_viewStudentAnswers = function(id){
@@ -1127,7 +1196,35 @@
     `;
   }
 
-  window.app_beginTest = async function(){
+  /* Pinning gate: inside the exam app the test never starts until Android confirms
+     screen pinning is really on. */
+  let pinGateTimer = null;
+  function showPinGate(onPinned){
+    view = 'pin-gate';
+    app.innerHTML = `
+      ${topbar('Lock required')}
+      <div class="panel" style="max-width:520px; margin:0 auto;">
+        <h2 class="section-title">Turn on screen pinning</h2>
+        <p class="helper" style="margin-bottom:14px;">The test cannot start until the screen is pinned. Tap <strong>"Got it" / "Start"</strong> on the Android pinning pop-up.</p>
+        <p class="helper" style="margin-bottom:16px;">No pop-up? Open phone <strong>Settings</strong>, search for <strong>"Screen pinning"</strong> (also called "App pinning" or "Pin windows"), turn it ON, then come back to this app.</p>
+        <button class="btn" onclick="app_pinGateRetry()">Try again</button>
+        <div class="helper" style="margin-top:12px;">This page continues automatically once pinning is on.</div>
+      </div>`;
+    nbSafe(()=> NB.requestPin());
+    if(pinGateTimer) clearInterval(pinGateTimer);
+    pinGateTimer = setInterval(()=>{
+      if(nbSafe(()=> NB.isPinned(), false)){
+        clearInterval(pinGateTimer); pinGateTimer = null;
+        onPinned();
+      }
+    }, 700);
+  }
+  window.app_pinGateRetry = function(){ nbSafe(()=> NB.requestPin()); };
+
+  window.app_beginTest = async function(autoResume){
+    if(IN_NATIVE && !nbSafe(()=> NB.isPinned(), false)){
+      return showPinGate(()=> window.app_beginTest(autoResume===true));
+    }
     const btn = document.getElementById('s-begin-btn');
     if(btn){ btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Starting…'; }
     const el = document.documentElement;
@@ -1136,7 +1233,8 @@
       else if(el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
     }catch(e){ /* proceed even if fullscreen is denied; violation tracking still runs */ }
 
-    const startedAt = resumedProgress ? resumedProgress.startedAt : Date.now();
+    const startedAt = resumedProgress ? resumedProgress.startedAt
+      : (nativeResumeInfo && Number(nativeResumeInfo.startedAt)) || Date.now();
     const initialStatus = resumedProgress ? resumedProgress.status : studentTest.questions.map(()=> 'not-visited');
     const initialSelected = resumedProgress ? resumedProgress.answers : studentTest.questions.map(()=> null);
     let startIdx = initialStatus.findIndex(s=> s==='not-visited' || s==='not-answered');
@@ -1155,6 +1253,20 @@
     };
     if(attempt.status[attempt.current]==='not-visited') attempt.status[attempt.current] = 'not-answered';
     resumedProgress = null;
+    nativeResumeInfo = null;
+    // Lock identity in the app (refused if a different attempt is already active),
+    // and save once right away so the server always has this attempt's start time.
+    if(IN_NATIVE){
+      const ok = nbSafe(()=> NB.startAttempt(attempt.test.id, studentInfo.name, studentInfo.rollNo || '', String(startedAt)), true);
+      if(ok === false){
+        view='student-entry'; render();
+        const er = document.getElementById('s-error');
+        if(er) er.textContent = 'An earlier attempt on this phone is still open. Close the app and reopen it to continue that attempt.';
+        attempt = null;
+        return;
+      }
+    }
+    scheduleSaveProgress(true);
     setupAntiCheat();
 
     if(attempt.endAt <= Date.now()){
@@ -1225,9 +1337,11 @@
   }
   function blockDefault(e){ if(view==='player') e.preventDefault(); }
   function onVisibilityChange(){
+    if(IN_NATIVE) return; // the app counts leaving the screen itself (avoids double warnings)
     if(document.hidden && view==='player' && !attempt.submitting) registerViolation('You switched tabs or minimized the window.');
   }
   function onFullscreenChange(){
+    if(IN_NATIVE) return; // fullscreen is not meaningful inside the app WebView
     const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
     if(!inFs && view==='player' && !attempt.submitting) registerViolation('You exited fullscreen mode.');
   }
@@ -1254,7 +1368,14 @@
   /* ============ TIMER ============ */
   function startTimer(){
     if(attempt.timer) clearInterval(attempt.timer);
+    attempt.lastTick = Date.now();
     attempt.timer = setInterval(()=>{
+      const now = Date.now();
+      const drift = now - attempt.lastTick - 1000;   // a 1s timer that ran late = page was frozen/throttled
+      attempt.lastTick = now;
+      if(drift > 4000) nbLog('js_frozen', {drift_ms: Math.round(drift)}, drift);
+      drainNativeViolations();
+      if(!attempt || attempt.submitting) return;
       const remain = (attempt.endAt - Date.now())/1000;
       if(remain<=0){ clearInterval(attempt.timer); submitAttemptFlow(true, false); return; }
       updateTimerDisplay(remain);
@@ -1427,6 +1548,7 @@
         violations: attempt.violations,
         timeTakenSec
       });
+      if(IN_NATIVE) nbSafe(()=> NB.endAttempt());   // clean end: stop tracking, unpin, restore DND
       resultData = data.result;
       resultData.test = attempt.test;
       resultData.timedOut = timedOut;
@@ -1546,13 +1668,56 @@
     return `${window.location.origin}${window.location.pathname}?${STUDENT_LINK_KEY}=${STUDENT_LINK_VALUE}`;
   }
 
+  /* ============ AUTO-RESUME (app was killed / reloaded mid-test) ============
+     The identity comes from the app's locked storage — the student cannot type a
+     different name to start a fresh attempt. Progress and start time come from
+     the server, so the timer continues from the original start. */
+  function autoResumeFromNative(info){
+    role = 'student';
+    const run = async function(){
+      setLoading('Resuming your test…');
+      try{
+        // NOTE: getProgress failure must NOT fall back to "no progress" — that would
+        // overwrite the saved answers with an empty sheet. Retry instead.
+        const [testData, progressData] = await Promise.all([
+          apiCall('getTestForStudent', {id: info.testId}),
+          apiCall('getProgress', {testId: info.testId, studentName: info.name, rollNo: info.rollNo || ''})
+        ]);
+        studentTest = testData.test;
+        studentInfo = {name: info.name, rollNo: info.rollNo || ''};
+        resumedProgress = progressData.progress || null;
+        nativeResumeInfo = info;
+        await window.app_beginTest(true);
+      }catch(e){
+        view = 'resume-error';
+        app.innerHTML = `
+          ${topbar('Resuming')}
+          <div class="panel" style="max-width:460px; margin:0 auto;">
+            <h2 class="section-title">Couldn't resume your test</h2>
+            <p class="helper" style="color:var(--red); margin-bottom:14px;">${escapeHtml(e.message || String(e))}</p>
+            <p class="helper" style="margin-bottom:14px;">Check your internet connection. The timer keeps running from your original start time.</p>
+            <button class="btn" onclick="app_retryResume()">Try again</button>
+          </div>`;
+      }
+    };
+    window.app_retryResume = run;
+    run();
+  }
+
   /* ============ INIT ============ */
   (function init(){
     injectDiagnosticsFooter();
     const params = new URLSearchParams(window.location.search);
     const r = params.get('role');
     const isStudentLink = params.get(STUDENT_LINK_KEY) === STUDENT_LINK_VALUE || r==='student';
-    if(isStudentLink){ forcedRole='student'; window.app_goStudentEntry(); }
+    if(isStudentLink){
+      forcedRole='student';
+      const info = IN_NATIVE ? nbSafe(()=> NB.getActiveAttempt(), '') : '';
+      if(info){
+        try{ autoResumeFromNative(JSON.parse(info)); }
+        catch(e){ window.app_goStudentEntry(); }
+      } else window.app_goStudentEntry();
+    }
     else if(r==='teacher'){ window.app_goTeacher(); }
     else { render(); }
   })();
